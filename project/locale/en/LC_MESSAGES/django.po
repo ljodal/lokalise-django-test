@@ -1,0 +1,33 @@
+msgid ""
+msgstr ""
+"Project-Id-Version: PACKAGE VERSION\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2022-01-25 22:21+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"Language: \n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=2; plural=(n != 1);\n"
+
+#: project/settings.py:114
+msgid "English"
+msgstr "Foo"
+
+#: project/app/views.py:8
+msgid "Foo"
+msgstr "Foo"
+
+#: project/app/views.py:10
+msgid "Hello {name}, I'm Django!"
+msgstr "Hello {name}, I'm Django!"
+
+#: project/settings.py:113
+msgid "Norwegian"
+msgstr "Norwegian"
+
+#: project/app/views.py:11
+msgid "world"
+msgstr "world"
