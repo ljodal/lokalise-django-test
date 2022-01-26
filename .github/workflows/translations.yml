@@ -22,7 +22,7 @@ jobs:
     # Only run this if the PR is flagged with needs-translations. We do this
     # because we don't want to upload work-in-progress translations until the
     # developer marks the PR as ready.
-    if: contains(github.event.pull_request.labels.*.name, 'needs-translations')
+    if: contains(github.event.pull_request.labels.*.name, 'needs translations')
     steps:
       - name: Checkout
         uses: actions/checkout@v2
