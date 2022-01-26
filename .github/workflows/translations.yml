@@ -28,7 +28,7 @@ jobs:
         uses: actions/checkout@v2
       - name: Install Lokalise CLI
         run: |
-          curl -sfL https://raw.githubusercontent.com/lokalise/lokalise-cli-2-go/master/install.sh | sh - -b "${{ github.workspace }}/bin"
+          curl -sfL https://raw.githubusercontent.com/lokalise/lokalise-cli-2-go/master/install.sh | sh
           echo "${{ github.workspace }}/bin" >> $GITHUB_PATH
       - name: Upload .po files
         run: |
