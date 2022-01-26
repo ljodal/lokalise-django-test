@@ -36,7 +36,7 @@ jobs:
             --token "${{ secrets.LOKALISE_API_TOKEN }}" \
             --project-id "${{ secrets.LOKALISE_PROJECT_ID }}" \
             file upload \
-            --file "project/locale/en/LC_MESSAGES/django.po"
+            --file "project/locale/en/LC_MESSAGES/django.po" \
             --lang-iso en \
             --convert-placeholders=false
             --tags \
