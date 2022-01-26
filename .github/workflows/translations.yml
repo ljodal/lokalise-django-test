@@ -1,0 +1,44 @@
+name: Translations
+
+on: 
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+    paths:
+      - '**.po'
+
+env:
+  PYTHON_VERSION: "3.10"
+  POETRY_VERSION: "1.1.12"
+  POETRY_HOME: "~/.poetry"
+
+concurrency:
+  group: translations-${{ github.event.pull_request.number }}
+  cancel-in-progress: false # Let previous job complete
+
+jobs:
+  upload-to-lokalise:
+    name: Upload to Lokalise
+    runs-on: ubuntu-latest
+    # Only run this if the PR is flagged with needs-translations. We do this
+    # because we don't want to upload work-in-progress translations until the
+    # developer marks the PR as ready.
+    if: contains(github.event.pull_request.labels.*.name, 'needs-translations')
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+      - name: Install Lokalise CLI
+        run: |
+          curl -sfL https://raw.githubusercontent.com/lokalise/lokalise-cli-2-go/master/install.sh | sh - -b "${{ github.workspace }}/bin"
+          echo "${{ github.workspace }}/bin" >> $GITHUB_PATH
+      - name: Upload .po files
+        run: |
+          lokalise2 \
+            --token "${{ secrets.LOKALISE_API_TOKEN }}" \
+            --project-id "${{ secrets.LOKALISE_PROJECT_ID }}" \
+            file upload \
+            --file "project/locale/en/LC_MESSAGES/django.po"
+            --lang-iso en \
+            --convert-placeholders=false
+            --tags \
+              "user:${{ github.event.pull_request.user.login }}" \
+              "pr:${{ github.event.pull_request.number }}"
