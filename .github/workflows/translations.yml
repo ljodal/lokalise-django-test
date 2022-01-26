@@ -38,7 +38,7 @@ jobs:
             file upload \
             --file "project/locale/en/LC_MESSAGES/django.po" \
             --lang-iso en \
-            --convert-placeholders=false
+            --convert-placeholders=false \
             --tags \
               "user:${{ github.event.pull_request.user.login }}" \
               "pr:${{ github.event.pull_request.number }}"
