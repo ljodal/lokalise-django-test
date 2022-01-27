@@ -58,8 +58,6 @@ jobs:
             const commentText = `
             Your translations have been uploaded to Lokalise. We will notify you when the translations are ready.
 
-            <hr />
-
             <details>
             <summary>About this bot</summary>
             This comment was posted by <a href="${runLink}">this workflow</a>.
@@ -110,13 +108,10 @@ jobs:
               return;
             }
 
-            const commentText = `
-            Howdy 👋 It looks like this pull request contains changes to
-            translations. When your PR is ready please add the `needs translations`
-            label to the PR. The translations will then be
-            automatically uploaded to Lokalise.
+            const runLink = `${context.serverUrl}/${context.payload.repository.full_name}/actions/runs/${context.runId}`;
 
-            <hr />
+            const commentText = `
+            Howdy 👋 It looks like this pull request contains changes to translations. When your PR is ready please add the \`needs translations\` label to the PR. The translations will then be automatically uploaded to Lokalise.
 
             <details>
             <summary>About this bot</summary>
