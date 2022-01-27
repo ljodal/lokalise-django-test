@@ -32,7 +32,7 @@ jobs:
           echo "${{ github.workspace }}/bin" >> $GITHUB_PATH
       - name: Upload .po files
         run: |
-          languages=("en", "nb")
+          languages=("en" "nb")
           for language in "${languages[@]}"; do
               lokalise2 \
                 --token "${{ secrets.LOKALISE_API_TOKEN }}" \
