@@ -18,7 +18,7 @@ msgstr "Engelsk"
 
 #: project/app/views.py:8
 msgid "Foo"
-msgstr "🙃"
+msgstr "Foo"
 
 #: project/app/views.py:10
 msgid "Hello {name}, I'm Django!"
