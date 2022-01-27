@@ -39,6 +39,96 @@ jobs:
             --file "project/locale/en/LC_MESSAGES/django.po" \
             --lang-iso en \
             --convert-placeholders=false \
-            --tags \
-              "user:${{ github.event.pull_request.user.login }}" \
-              "pr:${{ github.event.pull_request.number }}"
+            --tags "user:${{ github.event.pull_request.user.login }},pr:${{ github.event.pull_request.number }}"
+      - name: Comment on PR
+        uses: actions/github-script@v5
+        with:
+          script: |
+            const markerComment = "<!-- translations uploaded to lokalise -->";
+
+            const issue_number = context.payload.pull_request.number;
+            const {data: comments} = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issue_number,
+            });
+            const comment = comments.find(comment => comment.body.includes(markerComment));
+            const runLink = `${context.serverUrl}/${context.payload.repository.full_name}/actions/runs/${context.runId}`;
+
+            const commentText = `
+            Your translations have been uploaded to Lokalise. We will notify you when the translations are ready.
+
+            <hr />
+
+            <details>
+            <summary>About this bot</summary>
+            This comment was posted by <a href="${runLink}">this workflow</a>.
+            </details>
+
+            ${markerComment}
+            `;
+
+            if (comment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: comment.id,
+                body: commentText,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue_number,
+                body: commentText,
+              });
+            }
+
+  comment:
+    name: Comment on PR
+    runs-on: ubuntu-latest
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs translations') }}
+    steps:
+      - name: Comment on PR
+        uses: actions/github-script@v5
+        with:
+          script: |
+            const uploadedMarkerComment = "<!-- translations uploaded to lokalise -->";
+            const markerComment = "<!-- how to upload to lokalise -->";
+
+            const issue_number = context.payload.pull_request.number;
+            const {data: comments} = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issue_number,
+            });
+
+            // Only comment if we haven't already done so
+            if (
+              comments.some(comment => comment.body.includes(markerComment) || comment.body.includes(uploadedMarkerComment))
+            ) {
+              return;
+            }
+
+            const commentText = `
+            Howdy 👋 It looks like this pull request contains changes to
+            translations. When your PR is ready please add the `needs translations`
+            label to the PR. The translations will then be
+            automatically uploaded to Lokalise.
+
+            <hr />
+
+            <details>
+            <summary>About this bot</summary>
+            This comment was posted by <a href="${runLink}">this workflow</a>.
+            </details>
+
+            ${markerComment}
+            `;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issue_number,
+              body: commentText,
+            });
