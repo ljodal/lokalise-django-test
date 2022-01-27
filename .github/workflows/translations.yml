@@ -1,6 +1,6 @@
 name: Translations
 
-on: 
+on:
   pull_request:
     types: [opened, synchronize, reopened, labeled]
     paths:
