@@ -160,6 +160,9 @@ def extract_django(
              tuples
     """
 
+    # Get a relative path to the file so we can show generate "pretty" messages
+    path = Path(fileobj.name).relative_to(Path(".").absolute())
+
     message_context = None
     intrans = False
     inplural = False
@@ -283,7 +286,7 @@ def extract_django(
                     if t.token_type != TokenType.COMMENT:
                         for c in lineno_comment_map[comment_lineno_cache]:
                             print(
-                                f"{fileobj.name}:{cur_lineno}: "
+                                f"{path}:{cur_lineno}: "
                                 f"The translator-targeted comment '{c}' "
                                 f"was ignored, because it wasn't "
                                 f"the last item on the line."
@@ -351,7 +354,7 @@ def extract_django(
                 else:
                     if comments:
                         print(
-                            f"{fileobj.name}:{t.lineno}: "
+                            f"{path}:{t.lineno}: "
                             "This is not a translation tag, the "
                             "translator-targeted comments above it will be ignored"
                         )
@@ -443,25 +446,36 @@ class Checker:
     that accepts a Message as a positional argument.
     """
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, *, template: Catalog) -> None:
         self.path = path
         with open(path) as f:
             self.catalog = read_po(f)
+        self.catalog.update(template)
         self.message: Optional[Message] = None
         self.has_errors = False
 
     def emit_error(self, message: str) -> None:
         assert self.message is not None
-        print(f"{self.path}:{self.message.lineno}: {message}")
+        if self.message.lineno:
+            print(f"{self.path}:{self.message.lineno}: {message}")
+        elif self.message.locations:
+            for file, lineno in self.message.locations:
+                print(f"{file}:{lineno}: {message}")
+        else:
+            print(f"{self.path}: {message}")
         self.has_errors = True
 
     def check_is_translated(self, message: Message) -> None:
 
         message_strings = (
-            (message.string,) if isinstance(message.string, str) else message.string
+            message.string
+            if isinstance(message.string, (list, tuple))
+            else (message.string,)
         )
-        if any(string.strip() == "" for string in message_strings):
-            self.emit_error("Missing translation")
+        if any(string is None or string.strip() == "" for string in message_strings):
+            self.emit_error(
+                f"Missing translation for {self.catalog.locale.display_name}"
+            )
 
     def check_missing_brace_format_flag(self, message: Message) -> None:
         """
@@ -469,7 +483,11 @@ class Checker:
         appears to be using brace formatting.
         """
 
-        message_ids = (message.id,) if isinstance(message.id, str) else message.id
+        message_ids = (
+            message.id
+            if isinstance(message.id, (list, tuple))
+            else ((message.id,) if message.id else ())
+        )
         if not any(
             field_name
             for message_id in message_ids
@@ -489,16 +507,22 @@ class Checker:
         present in the key.
         """
 
-        message_ids = (message.id,) if isinstance(message.id, str) else message.id
-        message_strings = (
-            (message.string,) if isinstance(message.string, str) else message.string
+        message_ids: tuple[str, ...] = (
+            tuple(message.id)
+            if isinstance(message.id, (tuple, list))
+            else (message.id,)
+        )
+        message_strings: tuple[str, ...] = (
+            tuple(message.string)
+            if isinstance(message.string, (tuple, list))
+            else ((message.string,) if message.string else ())
         )
 
-        for message_id, message_string in zip(message_ids, message_strings):
+        for message_id, message_string in zip_longest(message_ids, message_strings):
             self._check_brace_format(message_id, message_string, message.flags)
 
     def _check_brace_format(
-        self, message_id: str, message_string: str, flags: set[str]
+        self, message_id: str, message_string: str | None, flags: set[str]
     ) -> None:
         """
         Check that any brace formatted field names used in the message string
@@ -508,7 +532,7 @@ class Checker:
         id_field_names = parse_brace_field_names(message_id)
 
         # Extract all field names that are defined in the translation string
-        string_field_names = parse_brace_field_names(message_string)
+        string_field_names = parse_brace_field_names(message_string or "")
         if not string_field_names:
             return
 
@@ -523,7 +547,9 @@ class Checker:
         automatically adds the flag if the translation contains interpolations.
         """
 
-        message_ids = (message.id,) if isinstance(message.id, str) else message.id
+        message_ids = (
+            message.id if isinstance(message.id, (list, tuple)) else (message.id,)
+        )
         if not any(
             field_name
             for message_id in message_ids
@@ -544,22 +570,30 @@ class Checker:
         present in the key.
         """
 
-        message_ids = (message.id,) if isinstance(message.id, str) else message.id
-        message_strings = (
-            (message.string,) if isinstance(message.string, str) else message.string
+        message_ids: tuple[str, ...] = (
+            tuple(message.id)
+            if isinstance(message.id, (tuple, list))
+            else (message.id,)
+        )
+        message_strings: tuple[str, ...] = (
+            tuple(message.string)
+            if isinstance(message.string, (tuple, list))
+            else (message.string,)
+            if message.string
+            else ()
         )
 
-        for message_id, message_string in zip(message_ids, message_strings):
+        for message_id, message_string in zip_longest(message_ids, message_strings):
             self._check_interpolate_format(message_id, message_string, message.flags)
 
     def _check_interpolate_format(
-        self, message_id: str, message_string: str, flags: set[str]
+        self, message_id: str, message_string: str | None, flags: set[str]
     ) -> None:
 
         id_field_names = parse_interpolate_field_names(message_id)
 
         # Extract all field names that are defined in the translation string
-        string_field_names = parse_interpolate_field_names(message_string)
+        string_field_names = parse_interpolate_field_names(message_string or "")
         if not string_field_names:
             return
 
@@ -616,6 +650,8 @@ def check(paths: list[Path]) -> None:
 
     files_to_check: list[Path] = []
 
+    template = extract_translations(Path("."))
+
     for path in paths:
         if path.is_dir():
             for file in path.glob("**/*.po"):
@@ -624,7 +660,7 @@ def check(paths: list[Path]) -> None:
             files_to_check.append(path)
 
     for file in files_to_check:
-        if Checker(file).check():
+        if Checker(file, template=template).check():
             has_errors = True
 
     if has_errors:
@@ -920,10 +956,10 @@ def compile() -> None:
 #######################
 
 
-def extract() -> None:
+def extract_translations(path: Path) -> Catalog:
     """
-    Extract translations from the source code and update the existing
-    translation catalogs.
+    Extract translations from source and return a template catalog, ie. a
+    catalog with only message ids, no translations.
     """
 
     print("🔬 Extracting translations ...")
@@ -946,6 +982,17 @@ def extract() -> None:
         template.add(
             message, None, [(filename, lineno)], auto_comments=comments, context=context
         )
+
+    return template
+
+
+def extract() -> None:
+    """
+    Extract translations from the source code and update the existing
+    translation catalogs.
+    """
+
+    template = extract_translations(Path("."))
 
     for path in Path(".").glob("project/locale/**/*.po"):
 
