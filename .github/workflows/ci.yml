@@ -18,11 +18,21 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v2
-        with:
-          submodules: true
       - name: Setup project
         uses: ./.github/actions/setup-project
       - name: Add problem matcher
         run: echo "::add-matcher::.github/${{ matrix.linter }}-problem-matcher.json"
       - name: Run ${{ matrix.linter }}
         run: make ${{ matrix.linter }}
+  translations:
+    name: "Translations"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+      - name: Setup project
+        uses: ./.github/actions/setup-project
+      - name: Add problem matcher
+        run: echo "::add-matcher::.github/translations-problem-matcher.json"
+      - name: Check translations
+        run: ./bin/translations check ./project
