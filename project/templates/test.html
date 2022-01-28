@@ -1,0 +1,29 @@
+{# Translators: This is a comment for translators #}
+{% blocktranslate trimmed with my_var="foo" %}
+    Hello world {{ my_var }}
+{% endblocktranslate %}
+
+{# Translators: ... #}
+{% for i in [1, 2] %}
+    {% translate "test in loop" %}
+{% endfor %}
+
+
+{% comment %}
+Translators:
+
+This is a comment for you!
+{% endcomment %}
+{% comment %}
+Translators: Another comment
+
+It goes over multiple lines
+{% endcomment %}
+{% translate "test" %}
+
+
+
+{# Translators: 1 #}{# Translators: 2 #}
+{% translate "test 2" %}
+
+{# Translators: 1 #}{% translate "test 3" %}

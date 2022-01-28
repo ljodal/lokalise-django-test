@@ -1,0 +1,172 @@
+#!/usr/bin/env python3
+
+import argparse
+import json
+import subprocess
+from base64 import b64encode
+from http.client import HTTPResponse
+from io import BytesIO, StringIO
+from pathlib import Path
+from pprint import pprint
+from typing import Any
+from urllib.request import Request, urlopen
+
+from babel.messages import Catalog, Message
+from babel.messages.pofile import read_po, write_po
+
+
+def load_from_git(*, path: Path, base_commit: str) -> Catalog:
+    """
+    Load a catalog at a certain commit.
+    """
+
+    proc = subprocess.run(
+        ["git", "show", f"{base_commit}:{path}"],
+        check=True,
+        capture_output=True,
+        encoding="utf-8",
+    )
+
+    return read_po(StringIO(proc.stdout.replace("Language: ", "Language: nb")))
+
+
+def has_changed(previous: Message, current: Message) -> bool:
+    """
+    Check if a message has changed compared to a previous version.
+    """
+
+    return (
+        previous.id != current.id
+        or previous.flags != current.flags
+        or previous.string != current.string
+        or previous.user_comments != current.user_comments
+        or previous.auto_comments != current.auto_comments
+    )
+
+
+def diff_catalogs(previous: Catalog, current: Catalog) -> tuple[set[str], set[str]]:
+    """
+    Given two catalogs find added, changed and removed keys.
+    """
+
+    previous_keys = {msg.id for msg in previous if msg.id}
+    current_keys = {msg.id for msg in current if msg.id}
+
+    added_keys = current_keys - previous_keys
+    updated_keys = {
+        key
+        for key in current_keys
+        if key in previous and has_changed(current[key], previous[key])
+    }
+
+    return added_keys, updated_keys
+
+
+def request(method: str, url: str, /, api_token: str, data: dict) -> Any:
+    """
+    Perform an HTTP request
+    """
+
+    req = Request(
+        url,
+        method=method,
+        headers={"x-api-token": api_token},
+        data=json.dumps(data).encode("utf-8"),
+    )
+
+    with urlopen(req) as response:
+        assert isinstance(response, HTTPResponse)
+        assert "json" in response.getheader("content-type", "")
+        return json.loads(response.read())
+
+
+def upload_to_lokalise(
+    catalog: Catalog, /, project_id: str, api_token: str, filename: str, tags: list[str]
+) -> None:
+    """
+    Upload the given catalog to Lokalise
+    """
+
+    buf = BytesIO()
+    write_po(buf, catalog, omit_header=True)
+    file_contents = b64encode(buf.getvalue()).decode()
+
+    url = f"https://api.lokalise.com/api2/projects/{project_id}/files/upload"
+    data = {
+        "data": file_contents,
+        "filename": filename,
+        "lang_iso": catalog.locale.language,
+        "convert_placeholders": False,
+        "tags": tags,
+        "tag_inserted_keys": True,
+        "tag_updated_keys": True,
+        "replace_modified": True,
+    }
+
+    pprint(request("POST", url, api_token=api_token, data=data))
+
+
+def upload_files(
+    paths: list[Path],
+    *,
+    base_commit: str,
+    lokalise_project_id: str,
+    lokalise_api_token: str,
+    lokalise_tags: list[str],
+) -> None:
+
+    for path in paths:
+        print(f"📡 Uploading {path}")
+
+        with open(path) as f:
+            current = read_po(f)
+
+        previous = load_from_git(path=path, base_commit=base_commit)
+        added, updated = diff_catalogs(previous, current)
+
+        # Upload changed translations to Lokalise. We do this by creating a new
+        # catalog with only the changed translations and then upload that through
+        # the Lokalise API.
+        catalog = Catalog(locale=current.locale)
+        for key in added | updated:
+            catalog[key] = current[key]
+
+        upload_to_lokalise(
+            catalog,
+            filename=str(path),
+            project_id=lokalise_project_id,
+            api_token=lokalise_api_token,
+            tags=lokalise_tags,
+        )
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Diff translations agains a commit")
+    parser.add_argument(
+        "--base-commit",
+        help="A git commit hash to check for changes against",
+        required=True,
+        metavar="GIT_REVISION",
+    )
+
+    lokalise_args = parser.add_argument_group("Lokalise")
+    lokalise_args.add_argument(
+        "--lokalise-project-id", required=True, metavar="PROJECT_ID"
+    )
+    lokalise_args.add_argument(
+        "--lokalise-api-token", required=True, metavar="API_TOKEN"
+    )
+    lokalise_args.add_argument(
+        "--lokalise-tags",
+        help="Optional list of tags to add in Lokalise",
+        default=[],
+        nargs="+",
+        metavar="TAG",
+    )
+
+    args = parser.parse_args()
+
+    upload_files(
+        paths=list(Path(".").glob("project/**/*.po")),
+        **{attr: getattr(args, attr) for attr in dir(args) if not attr.startswith("_")},
+    )

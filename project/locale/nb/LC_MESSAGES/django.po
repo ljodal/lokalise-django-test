@@ -1,33 +1,65 @@
+
 msgid ""
 msgstr ""
 "Project-Id-Version: PACKAGE VERSION\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2022-01-25 22:21+0000\n"
+"POT-Creation-Date: 2022-01-28 02:42+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
-"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
-"Language-Team: LANGUAGE <LL@li.org>\n"
-"Language: \n"
+"Last-Translator: Sigurd Ljødal\n"
+"Language: nb\n"
+"Language-Team: \n"
+"Plural-Forms: nplurals=2; plural=(n != 1)\n"
 "MIME-Version: 1.0\n"
-"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"Plural-Forms: nplurals=2; plural=(n != 1);\n"
+"Generated-By: Babel 2.9.1\n"
 
-#: project/settings.py:114
+#: project/settings.py:115
+msgid "Norwegian"
+msgstr "Norsk"
+
+#: project/settings.py:116
 msgid "English"
 msgstr "Engelsk"
 
 #: project/app/views.py:8
 msgid "Foo"
-msgstr "🙃"
+msgstr "Foo"
 
-#: project/app/views.py:10
+#. This is a test
+#: project/app/views.py:11
+#, python-brace-format
 msgid "Hello {name}, I'm Django!"
 msgstr "Hei {name}, jeg er Django!"
 
-#: project/settings.py:113
-msgid "Norwegian"
-msgstr "Norsk"
-
-#: project/app/views.py:11
+#: project/app/views.py:12
 msgid "world"
 msgstr "verden"
+
+#. This is a comment for translators
+#: project/templates/test.html:4
+#, python-format
+msgid "Hello world %(my_var)s"
+msgstr "Hei verden %(my_var)s"
+
+#: project/templates/test.html:8
+msgid "test in loop"
+msgstr "test in loop"
+
+#. This is a comment for you!
+#. Another comment
+#. It goes over multiple lines
+#: project/templates/test.html:22
+msgid "test"
+msgstr "test"
+
+#. 1
+#. 2
+#: project/templates/test.html:27
+msgid "test 2"
+msgstr "test 2"
+
+#: project/templates/test.html:29
+msgid "test 3"
+msgstr "test 3"
+

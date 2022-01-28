@@ -1,0 +1,349 @@
+#!/usr/bin/env python3
+
+import argparse
+import json
+import subprocess
+from http.client import HTTPResponse
+from io import StringIO
+from itertools import zip_longest
+from pathlib import Path
+from textwrap import dedent, indent
+from typing import Any
+from urllib.request import Request, urlopen
+
+from babel.messages import Catalog, Message
+from babel.messages.pofile import normalize, read_po
+from babel.util import wraptext
+
+
+def load_from_git(*, path: Path, base_commit: str) -> Catalog:
+    """
+    Load a catalog at a certain commit.
+    """
+
+    proc = subprocess.run(
+        ["git", "show", f"{base_commit}:{path}"],
+        check=True,
+        capture_output=True,
+        encoding="utf-8",
+    )
+
+    return read_po(StringIO(proc.stdout.replace("Language: ", "Language: nb")))
+
+
+def has_changed(previous: Message, current: Message) -> bool:
+    """
+    Check if a message has changed compared to a previous version.
+    """
+
+    return (
+        previous.id != current.id
+        or previous.flags != current.flags
+        or previous.string != current.string
+        or previous.user_comments != current.user_comments
+        or previous.auto_comments != current.auto_comments
+    )
+
+
+def diff_catalogs(
+    previous: Catalog, current: Catalog
+) -> tuple[set[str], set[str], set[str]]:
+    """
+    Given two catalogs find added, changed and removed keys.
+    """
+
+    previous_keys = {msg.id for msg in previous if msg.id}
+    current_keys = {msg.id for msg in current if msg.id}
+
+    added_keys = current_keys - previous_keys
+    updated_keys = {
+        key
+        for key in current_keys
+        if key in previous and has_changed(current[key], previous[key])
+    }
+    removed_keys = previous_keys - current_keys
+
+    return added_keys, updated_keys, removed_keys
+
+
+def format_comment(comment: str, /, prefix="#") -> str:
+    """Wrap a comment over multiple lines"""
+
+    return "\n".join(f"{prefix} {line}" for line in wraptext(comment, 76))
+
+
+def format_message(message: Message, obsolete: bool = False) -> str:
+    """
+    Format a single message in .po format.
+    """
+
+    prefix = "#~ " if obsolete else ""
+
+    bits = []
+
+    for comment in message.user_comments:
+        bits.append(format_comment(comment))
+
+    for comment in message.auto_comments:
+        bits.append(format_comment(comment, prefix="#."))
+
+    for file, line in sorted(message.locations):
+        bits.append(f"#: {file}:{line}" if line is not None else file)
+
+    for flag in sorted(message.flags):
+        bits.append(f"#, {flag}")
+
+    if message.context:
+        bits.append(f"{prefix}msgctxt {normalize(message.context, prefix)}")
+
+    if isinstance(message.id, (list, tuple)):
+        bits.append(f"{prefix}msgid {normalize(message.id[0], prefix)}")
+        bits.append(f"{prefix}msgid_plural {normalize(message.id[1], prefix)}")
+
+        for idx, string in enumerate(message.string):
+            bits.append(f"{prefix}msgstr[{idx}] {normalize(string, prefix)}")
+    else:
+        bits.append(f"{prefix}msgid {normalize(message.id, prefix)}")
+        bits.append(f"{prefix}msgstr {normalize(message.string or '', prefix)}")
+
+    return "\n".join(bits)
+
+
+def format_message_diff(previous: Message, current: Message) -> str:
+    """
+    Create a diff between two messages in .po format.
+    """
+
+    prefix = ""
+
+    bits = []
+
+    for comment in current.user_comments:
+        if comment in previous.user_comments:
+            bits.append(format_comment(comment))
+        else:
+            bits.append(format_comment(comment, prefix="+#"))
+
+    for comment in previous.user_comments:
+        if comment not in current.user_comments:
+            bits.append(format_comment(comment, prefix="-#"))
+
+    for comment in current.auto_comments:
+        if comment in previous.auto_comments:
+            bits.append(format_comment(comment, prefix="#."))
+        else:
+            bits.append(format_comment(comment, prefix="+#."))
+
+    for comment in previous.auto_comments:
+        if comment not in current.auto_comments:
+            bits.append(format_comment(comment, prefix="-#,"))
+
+    for file, line in sorted(set(current.locations) | set(previous.locations)):
+        if (file, line) in current.locations and (file, line) in previous.locations:
+            bits.append(f"#: {file}:{line}" if line is not None else file)
+        elif (file, line) in previous.locations:
+            bits.append(f"-#: {file}:{line}" if line is not None else file)
+        else:
+            bits.append(f"+#: {file}:{line}" if line is not None else file)
+
+    for flag in sorted(previous.flags | current.flags):
+        if flag in previous.flags and flag in current.flags:
+            bits.append(f"#, {flag}")
+        elif flag in previous.flags:
+            bits.append(f"-#, {flag}")
+        else:
+            bits.append(f"+#, {flag}")
+
+    if previous.context != current.context:
+        bits.append(f"-{prefix}msgctxt {normalize(previous.context, '-' + prefix)}")
+        bits.append(f"+{prefix}msgctxt {normalize(current.context, '+' + prefix)}")
+    elif current.context:
+        bits.append(f"{prefix}msgctxt {normalize(current.context, prefix)}")
+
+    if isinstance(previous.id, (list, tuple)):
+        previous_id: str = previous.id[0]
+        previous_plural_id: str | None = previous.id[1]
+    else:
+        previous_id = previous.id
+        previous_plural_id = None
+
+    if isinstance(current.id, (list, tuple)):
+        current_id: str = current.id[0]
+        current_plural_id: str | None = current.id[1]
+    else:
+        current_id = current.id
+        current_plural_id = None
+
+    if previous_id != current_id:
+        bits.append(f"-{prefix}msgid {normalize(previous_id, '-' + prefix)}")
+        bits.append(f"+{prefix}msgid {normalize(current_id, '+' + prefix)}")
+    else:
+        bits.append(f"{prefix}msgid {normalize(current_id, prefix)}")
+
+    if current_plural_id != previous_plural_id:
+        if previous_plural_id:
+            bits.append(
+                f"-{prefix}msgid_plural {normalize(previous_plural_id, '-' + prefix)}"
+            )
+        if current_plural_id:
+            bits.append(
+                f"+{prefix}msgid_plural {normalize(current_plural_id, '+' + prefix)}"
+            )
+
+    is_previous_list = isinstance(previous.string, (list, tuple))
+    is_current_list = isinstance(previous.string, (list, tuple))
+
+    if is_previous_list and is_current_list:
+        for idx, (previous_string, current_string) in enumerate(
+            zip_longest(previous.string, current.string)
+        ):
+            if previous_string != current_string:
+                if previous_string:
+                    bits.append(
+                        f"-{prefix}msgstr[{idx}] {normalize(previous_string, '-' + prefix)}"  # noqa
+                    )
+                if current_string:
+                    bits.append(
+                        f"+{prefix}msgstr[{idx}] {normalize(current_string, '+' + prefix)}"  # noqa
+                    )
+            else:
+                bits.append(
+                    f"{prefix}msgstr[{idx}] {normalize(current_string, prefix)}"
+                )
+    elif is_current_list:
+        bits.append(f"-{prefix}msgstr {normalize(previous.string or '', '-' + prefix)}")
+        for idx, string in enumerate(current.string):
+            bits.append(f"+{prefix}msgstr[{idx}] {normalize(string, '+' + prefix)}")
+    elif is_previous_list:
+        for idx, string in enumerate(previous.string):
+            bits.append(f"-{prefix}msgstr[{idx}] {normalize(string, '-' + prefix)}")
+        bits.append(f"+{prefix}msgstr {normalize(current.string or '', '+' + prefix)}")
+    elif current.string != previous.string:
+        bits.append(f"-{prefix}msgstr {normalize(previous.string or '', '-' + prefix)}")
+        bits.append(f"+{prefix}msgstr {normalize(current.string or '', '+' + prefix)}")
+    else:
+        bits.append(f"{prefix}msgstr {normalize(current.string or '', prefix)}")
+
+    return "\n".join(bits)
+
+
+def request(method: str, url: str, /, api_token: str, data: dict) -> Any:
+    """
+    Perform an HTTP request
+    """
+
+    req = Request(
+        url,
+        method=method,
+        headers={"x-api-token": api_token},
+        data=json.dumps(data).encode("utf-8"),
+    )
+
+    with urlopen(req) as response:
+        assert isinstance(response, HTTPResponse)
+        assert "json" in response.getheader("content-type", "")
+        return json.loads(response.read())
+
+
+def post_github_comment(
+    diffs: dict[Path, str], api_key: str, repo: str, pull_number: int
+) -> None:
+    """
+    Post a comment with the provided diffs
+    """
+
+    header = (
+        "Hi there, it looks like made changes to the translations in this PR 🌍 "
+        "Below is a summary of the changes:"
+    )
+    changes = [
+        dedent(
+            """\
+            <details><summary><strong>{path}</strong></summary>
+
+            ```diff
+            {diff}
+            ```
+
+            </details>
+            """
+        ).format(path=path, diff=diff)
+        for path, diff in diffs.items()
+    ]
+    footer = (
+        "Once you are happy with the changes, please add the `needs translations` "
+        "label to the pull request to have these uploaded to Lokalise."
+    )
+
+    body = "\n\n".join((header, *changes, footer))
+
+    print(body)
+
+
+def diff_files(
+    paths: list[Path],
+    *,
+    base_commit: str,
+    github_api_key: str | None,
+    github_repo: str | None,
+    github_pull_number: int | None,
+) -> None:
+
+    diffs: dict[Path, str] = {}
+
+    for path in paths:
+        print(f"🔍 Checking {path}")
+
+        with open(path) as f:
+            current = read_po(f)
+
+        previous = load_from_git(path=path, base_commit=base_commit)
+        added, updated, removed = diff_catalogs(previous, current)
+
+        # Build a diff off the changes made to the file
+        messages: list[str] = []
+        for key in added | updated | removed:
+            if key in added:
+                messages.append(indent(format_message(current[key]), "+"))
+            if key in updated:
+                messages.append(format_message_diff(previous[key], current[key]))
+            if key in removed:
+                messages.append(indent(format_message(previous[key]), "-"))
+        if messages:
+            diffs[path] = "\n\n".join(messages)
+
+    # Post a comment on the GitHub oull request, showing the diff.
+    if diffs and github_api_key and github_repo and github_pull_number:
+        post_github_comment(
+            diffs,
+            api_key=github_api_key,
+            repo=github_repo,
+            pull_number=github_pull_number,
+        )
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Diff translations agains a commit")
+    parser.add_argument(
+        "--base-commit",
+        help="A git commit hash to check for changes against",
+        required=True,
+        metavar="GIT_REVISION",
+    )
+
+    github_args = parser.add_argument_group(
+        "Github",
+        "If these arguments are provided a comment is made on the pull request",
+    )
+    github_args.add_argument("--github-api-key", default=None, metavar="API_KEY")
+    github_args.add_argument("--github-repo", default=None, metavar="REPO")
+    github_args.add_argument(
+        "--github-pull-number", type=int, default=None, metavar="PULL_NUMBER"
+    )
+
+    args = parser.parse_args()
+
+    diff_files(
+        paths=list(Path(".").glob("project/**/*.po")),
+        **{attr: getattr(args, attr) for attr in dir(args) if not attr.startswith("_")},
+    )

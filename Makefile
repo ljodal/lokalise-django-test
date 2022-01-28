@@ -2,16 +2,20 @@ all : black mypy isort flake8
 
 .PHONY: black
 black:
-	black --check project
+	black --check project bin/*
 
 .PHONY: mypy
 mypy:
 	mypy project
+	mypy bin/check-translations
+	mypy bin/compare-translations
+	mypy bin/compile-translations
+	mypy bin/extract-translations
 
 .PHONY: isort
 isort:
-	isort --check-only project
+	isort --check-only project bin/*
 
 .PHONY: flake8
 flake8:
-	flake8 project
+	flake8 project bin/*
