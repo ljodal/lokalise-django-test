@@ -391,11 +391,23 @@ FORMATTER = Formatter()
 
 
 def parse_brace_field_names(format_str: str) -> list[str]:
-    return [
-        field_name
-        for _, field_name, _, _ in FORMATTER.parse(format_str)
-        if field_name is not None
-    ]
+    fields = []
+
+    for _, field_name, format_spec, conversion in FORMATTER.parse(format_str):
+        if not field_name:
+            continue
+
+        bits = [field_name]
+
+        if conversion:
+            bits.append(f"!{conversion}")
+
+        if format_spec:
+            bits.append(f":{format_spec}")
+
+        fields.append("{" + "".join(bits) + "}")
+
+    return list(dict.fromkeys(fields))
 
 
 PYTHON_FORMAT = re.compile(
@@ -418,7 +430,9 @@ def parse_interpolate_field_names(format_str: str) -> list[str]:
     Parse c-printf-style format string into list of field names.
     """
 
-    return [m.group(0) for m in re.finditer(PYTHON_FORMAT, format_str)]
+    return list(
+        dict.fromkeys(m.group(0) for m in re.finditer(PYTHON_FORMAT, format_str))
+    )
 
 
 class Checker:
@@ -491,14 +505,10 @@ class Checker:
         is also defined in the message key.
         """
 
-        id_field_names = {
-            field_name for field_name in parse_brace_field_names(message_id)
-        }
+        id_field_names = parse_brace_field_names(message_id)
 
         # Extract all field names that are defined in the translation string
-        string_field_names = {
-            field_name for field_name in parse_brace_field_names(message_string)
-        }
+        string_field_names = parse_brace_field_names(message_string)
         if not string_field_names:
             return
 
@@ -546,21 +556,17 @@ class Checker:
         self, message_id: str, message_string: str, flags: set[str]
     ) -> None:
 
-        id_field_names = {
-            field_name for field_name in parse_interpolate_field_names(message_id)
-        }
+        id_field_names = parse_interpolate_field_names(message_id)
 
         # Extract all field names that are defined in the translation string
-        string_field_names = {
-            field_name for field_name in parse_interpolate_field_names(message_string)
-        }
+        string_field_names = parse_interpolate_field_names(message_string)
         if not string_field_names:
             return
 
         self._check_fields(id_field_names, string_field_names)
 
     def _check_fields(
-        self, id_field_names: set[str], string_field_names: set[str]
+        self, id_field_names: list[str], string_field_names: list[str]
     ) -> None:
 
         missing_field_names = [
@@ -569,17 +575,15 @@ class Checker:
             if field_name not in id_field_names
         ]
         if len(missing_field_names) > 1:
-            *rest, last = reversed(missing_field_names)
+            *rest, last = missing_field_names
             field_names = ", ".join(f'"{field_name}"' for field_name in rest)
             self.emit_error(
-                f'Field names {field_names} and "{last}" are not present in '
+                f'The {field_names} and "{last}" variables are not present in '
                 f"the message id"
             )
         elif missing_field_names:
             field_name = missing_field_names[0]
-            self.emit_error(
-                f'Field name "{field_name}" is not present in the message id'
-            )
+            self.emit_error(f'Variable "{field_name}" is not present in the message id')
 
     def check(self) -> bool:
         """
