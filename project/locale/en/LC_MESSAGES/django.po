@@ -3,7 +3,6 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PACKAGE VERSION\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2022-01-28 02:42+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: Sigurd Ljødal\n"
 "Language: en\n"
@@ -38,6 +37,7 @@ msgstr "world"
 
 #. This is a comment for translators
 #: project/templates/test.html:4
+#, python-format
 msgid "Hello world %(my_var)s"
 msgstr "Hei verden"
 

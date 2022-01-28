@@ -926,6 +926,8 @@ def extract() -> None:
     translation catalogs.
     """
 
+    print("🔬 Extracting translations ...")
+
     method_map = {
         "**/templates/**.*": extract_django,
         "**.py": "python",
@@ -946,12 +948,22 @@ def extract() -> None:
         )
 
     for path in Path(".").glob("project/locale/**/*.po"):
+
+        print(f"💾 Updating {path}")
+
         with open(path, "rb") as f:
             catalog = read_po(f)
+
         catalog.update(template)
 
+        buf = BytesIO()
+        write_po(buf, catalog)
+        buf.seek(0)
+
         with open(path, "wb") as f:
-            write_po(f, catalog)
+            for line in buf:
+                if not line.startswith(b'"POT-Creation-Date:'):
+                    f.write(line)
 
 
 ######################
