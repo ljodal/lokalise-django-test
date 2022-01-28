@@ -1,0 +1,1177 @@
+#!/usr/bin/env python3
+"""
+Tools to interact with translations in the project. The main tools provided are:
+
+ * Checking: A linter that performs surface checks to ensure everything looks good
+ * Comparing: Helper to show which translations have been edited between two commits
+ * Compile: Compile .po files into .mo files
+ * Extract: Pull translations out of the source files and add them to the .po files
+ * Upload: Upload added and modified translations to Lokalise for external translation
+"""
+import functools
+import json
+import re
+import subprocess
+import sys
+from argparse import ArgumentParser, ArgumentTypeError
+from base64 import b64encode
+from http.client import HTTPResponse
+from io import BytesIO, StringIO
+from itertools import zip_longest
+from pathlib import Path
+from pprint import pprint
+from string import Formatter
+from textwrap import dedent, indent
+from typing import IO, Any, Iterator, Optional
+from urllib.request import Request, urlopen
+
+from babel.messages import Catalog, Message
+from babel.messages.extract import extract_from_dir
+from babel.messages.pofile import normalize, read_po, write_po
+from babel.util import wraptext
+from django.template.base import Lexer, TokenType
+from django.utils.encoding import smart_str
+from django.utils.translation import trim_whitespace  # type: ignore
+from django.utils.translation.template import (
+    block_re,
+    constant_re,
+    context_re,
+    endblock_re,
+    inline_re,
+    plural_re,
+)
+
+####################
+# Common utilities #
+####################
+
+
+def _color(value: str, *, color_code: str) -> str:
+    return f"\033[{color_code}m{value}\033[0m"
+
+
+bold = functools.partial(_color, color_code="1")
+red = functools.partial(_color, color_code="31")
+green = functools.partial(_color, color_code="32")
+magenta = functools.partial(_color, color_code="35")
+gray = functools.partial(_color, color_code="37")
+yellow = functools.partial(_color, color_code="93")
+
+
+def load_from_git(*, path: Path, base_commit: str) -> Catalog:
+    """
+    Load a catalog at a certain commit.
+    """
+
+    proc = subprocess.run(
+        ["git", "show", f"{base_commit}:{path}"],
+        check=True,
+        capture_output=True,
+        encoding="utf-8",
+    )
+
+    return read_po(StringIO(proc.stdout.replace("Language: ", "Language: nb")))
+
+
+def has_changed(previous: Message, current: Message) -> bool:
+    """
+    Check if a message has changed compared to a previous version.
+    """
+
+    return (
+        previous.id != current.id
+        or previous.flags != current.flags
+        or previous.string != current.string
+        or previous.user_comments != current.user_comments
+        or previous.auto_comments != current.auto_comments
+    )
+
+
+def diff_catalogs(
+    previous: Catalog, current: Catalog
+) -> tuple[set[str], set[str], set[str]]:
+    """
+    Given two catalogs find added, changed and removed keys.
+    """
+
+    previous_keys = {msg.id for msg in previous if msg.id}
+    current_keys = {msg.id for msg in current if msg.id}
+
+    added_keys = current_keys - previous_keys
+    updated_keys = {
+        key
+        for key in current_keys
+        if key in previous and has_changed(current[key], previous[key])
+    }
+    removed_keys = previous_keys - current_keys
+
+    return added_keys, updated_keys, removed_keys
+
+
+def request(method: str, url: str, /, headers: dict[str, str], data: dict) -> Any:
+    """
+    Perform an HTTP request
+    """
+
+    req = Request(
+        url,
+        method=method,
+        headers=headers,
+        data=json.dumps(data).encode("utf-8"),
+    )
+
+    with urlopen(req) as response:
+        assert isinstance(response, HTTPResponse)
+        assert "json" in response.getheader("content-type", "")
+        return json.loads(response.read())
+
+
+#########################################
+# Django template translation extractor #
+#########################################
+
+
+def join_tokens(tokens: list[str], trim=False) -> str:
+    message = "".join(tokens)
+    if trim:
+        message = trim_whitespace(message)
+    return message
+
+
+def strip_quotes(s: str) -> str:
+    if (s[0] == s[-1]) and s.startswith(("'", '"')):
+        return s[1:-1]
+    return s
+
+
+def extract_django(
+    fileobj: IO, keywords: list[str], comment_tags: list[str], options: dict
+) -> Iterator[tuple[int, str | None, str | tuple[str, ...], list[str]]]:
+    """
+    Extract messages from Django template files.
+
+    :param fileobj: the file-like object the messages should be extracted from
+    :param keywords: a list of keywords (i.e. function names) that should
+                     be recognized as translation functions
+    :param comment_tags: a list of translator tags to search for and
+                         include in the results
+    :param options: a dictionary of additional options (optional)
+    :return: an iterator over ``(lineno, funcname, message, comments)``
+             tuples
+    """
+
+    message_context = None
+    intrans = False
+    inplural = False
+    trimmed = False
+    singular: list[str] = []
+    plural: list[str] = []
+    incomment = False
+    comment: list[str] = []
+    lineno_comment_map: dict[int, list[str]] = {}
+    comment_lineno_cache: int | None = None
+
+    # A buffer of pending translator comments
+    comments: list[str] = []
+
+    def join_tokens(tokens, trim=False):
+        message = "".join(tokens)
+        if trim:
+            message = trim_whitespace(message)
+        return message
+
+    for t in Lexer(fileobj.read().decode()).tokenize():
+        assert t.lineno
+        if incomment:
+            if t.token_type == TokenType.BLOCK and t.contents == "endcomment":
+                content = "".join(comment)
+                translators_comment_start = None
+                for _lineno, line in enumerate(content.splitlines(True)):
+                    if any(
+                        line.lstrip().startswith(comment_tag)
+                        for comment_tag in comment_tags
+                    ):
+                        translators_comment_start = _lineno
+                if translators_comment_start:
+                    comments += (
+                        line
+                        for _lineno, line in enumerate(content.splitlines(True))
+                        if _lineno >= translators_comment_start
+                    )
+                incomment = False
+                comment = []
+            else:
+                comment.append(t.contents)
+        elif intrans:
+            if t.token_type == TokenType.BLOCK:
+                endbmatch = endblock_re.match(t.contents)
+                pluralmatch = plural_re.match(t.contents)
+                if endbmatch:
+                    if inplural:
+                        if message_context:
+                            yield (
+                                t.lineno,
+                                "npgettext",
+                                (
+                                    smart_str(message_context),
+                                    smart_str(join_tokens(singular, trimmed)),
+                                    smart_str(join_tokens(plural, trimmed)),
+                                ),
+                                comments,
+                            )
+                            comments = []
+                        else:
+                            yield (
+                                t.lineno,
+                                "ngettext",
+                                (
+                                    smart_str(join_tokens(singular, trimmed)),
+                                    smart_str(join_tokens(plural, trimmed)),
+                                ),
+                                comments,
+                            )
+                            comments = []
+                    else:
+                        if message_context:
+                            yield (
+                                t.lineno,
+                                "pgettext",
+                                (
+                                    smart_str(message_context),
+                                    smart_str(join_tokens(singular, trimmed)),
+                                ),
+                                comments,
+                            )
+                            comments = []
+                        else:
+                            yield (
+                                t.lineno,
+                                None,
+                                smart_str(join_tokens(singular, trimmed)),
+                                comments,
+                            )
+                            comments = []
+                    message_context = None
+                    intrans = False
+                    inplural = False
+                    singular = []
+                    plural = []
+                elif pluralmatch:
+                    inplural = True
+                else:
+                    raise SyntaxError(
+                        f"Translation blocks must not include other block tags: "
+                        f"{t.contents} (line {t.lineno})"
+                    )
+            elif t.token_type == TokenType.VAR:
+                if inplural:
+                    plural.append("%%(%s)s" % t.contents)
+                else:
+                    singular.append("%%(%s)s" % t.contents)
+            elif t.token_type == TokenType.TEXT:
+                contents = t.contents.replace("%", "%%")
+                if inplural:
+                    plural.append(contents)
+                else:
+                    singular.append(contents)
+        else:
+            # Handle comment tokens (`{# ... #}`) plus other constructs on
+            # the same line:
+            if comment_lineno_cache is not None:
+                cur_lineno = t.lineno + t.contents.count("\n")
+                if comment_lineno_cache == cur_lineno:
+                    if t.token_type != TokenType.COMMENT:
+                        for c in lineno_comment_map[comment_lineno_cache]:
+                            print(
+                                f"{fileobj.name}:{cur_lineno}: "
+                                f"The translator-targeted comment '{c}' "
+                                f"was ignored, because it wasn't "
+                                f"the last item on the line."
+                            )
+                        lineno_comment_map[comment_lineno_cache] = []
+                else:
+                    comments += lineno_comment_map[comment_lineno_cache]
+                comment_lineno_cache = None
+
+            if t.token_type == TokenType.BLOCK:
+                imatch = inline_re.match(t.contents)
+                bmatch = block_re.match(t.contents)
+                cmatches = constant_re.findall(t.contents)
+                if imatch:
+                    g = imatch[1]
+                    if g[0] == '"':
+                        g = g.strip('"')
+                    elif g[0] == "'":
+                        g = g.strip("'")
+                    g = g.replace("%", "%%")
+                    if imatch[2]:
+                        # A context is provided
+                        context_match = context_re.match(imatch[2])
+                        message_context = context_match[1]
+                        if message_context[0] == '"':
+                            message_context = message_context.strip('"')
+                        elif message_context[0] == "'":
+                            message_context = message_context.strip("'")
+                        yield (
+                            t.lineno,
+                            "pgettext",
+                            (smart_str(message_context), smart_str(g)),
+                            comments,
+                        )
+                        comments = []
+                        message_context = None
+                    else:
+                        yield t.lineno, None, smart_str(g), comments
+                        comments = []
+                elif bmatch:
+                    for fmatch in constant_re.findall(t.contents):
+                        stripped_fmatch = strip_quotes(fmatch)
+                        yield t.lineno, None, smart_str(stripped_fmatch), comments
+                        comments = []
+                    if bmatch[1]:
+                        # A context is provided
+                        context_match = context_re.match(bmatch[1])
+                        message_context = context_match[1]
+                        if message_context[0] == '"':
+                            message_context = message_context.strip('"')
+                        elif message_context[0] == "'":
+                            message_context = message_context.strip("'")
+                    intrans = True
+                    inplural = False
+                    trimmed = "trimmed" in t.split_contents()
+                    singular = []
+                    plural = []
+                elif cmatches:
+                    for cmatch in cmatches:
+                        stripped_cmatch = strip_quotes(cmatch)
+                        yield t.lineno, None, smart_str(stripped_cmatch), comments
+                        comments = []
+                elif t.contents == "comment":
+                    incomment = True
+                else:
+                    if comments:
+                        print(
+                            f"{fileobj.name}:{t.lineno}: "
+                            "This is not a translation tag, the "
+                            "translator-targeted comments above it will be ignored"
+                        )
+                    comments = []
+            elif t.token_type == TokenType.VAR:
+                parts = t.contents.split("|")
+                cmatch = constant_re.match(parts[0])
+                if cmatch:
+                    stripped_cmatch = strip_quotes(cmatch[1])
+                    yield t.lineno, None, smart_str(stripped_cmatch), comments
+                    comments = []
+                for p in parts[1:]:
+                    if p.find(":_(") >= 0:
+                        p1 = p.split(":", 1)[1]
+                        if p1[0] == "_":
+                            p1 = p1[1:]
+                        if p1[0] == "(":
+                            p1 = p1.strip("()")
+                        p1 = strip_quotes(p1)
+                        yield t.lineno, None, smart_str(p1), comments
+                        comments = []
+
+            elif t.token_type == TokenType.COMMENT:
+                if any(
+                    t.contents.lstrip().startswith(comment_tag)
+                    for comment_tag in comment_tags
+                ):
+                    lineno_comment_map.setdefault(t.lineno, []).append(t.contents)
+                    comment_lineno_cache = t.lineno
+
+
+#####################
+# Check sub-command #
+#####################
+
+FORMATTER = Formatter()
+
+
+def parse_brace_field_names(format_str: str) -> list[str]:
+    return [
+        field_name
+        for _, field_name, _, _ in FORMATTER.parse(format_str)
+        if field_name is not None
+    ]
+
+
+PYTHON_FORMAT = re.compile(
+    r"""
+\%
+    (?:\(([\w]*)\))?
+    (
+        [-#0\ +]?(?:\*|[\d]+)?
+        (?:\.(?:\*|[\d]+))?
+        [hlL]?
+    )
+    ([diouxXeEfFgGcrs%])
+""",
+    re.VERBOSE,
+)
+
+
+def parse_interpolate_field_names(format_str: str) -> list[str]:
+    """
+    Parse c-printf-style format string into list of field names.
+    """
+
+    return [m.group(0) for m in re.finditer(PYTHON_FORMAT, format_str)]
+
+
+class Checker:
+    """
+    Check a single PO file for violations.
+
+    To add a new checker implement a method with a name starting with check_
+    that accepts a Message as a positional argument.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        with open(path) as f:
+            self.catalog = read_po(f)
+        self.message: Optional[Message] = None
+        self.has_errors = False
+
+    def emit_error(self, message: str) -> None:
+        assert self.message is not None
+        print(f"{self.path}:{self.message.lineno}: {message}")
+        self.has_errors = True
+
+    def check_is_translated(self, message: Message) -> None:
+
+        message_strings = (
+            (message.string,) if isinstance(message.string, str) else message.string
+        )
+        if any(string.strip() == "" for string in message_strings):
+            self.emit_error("Missing translation")
+
+    def check_missing_brace_format_flag(self, message: Message) -> None:
+        """
+        Check that the message has the python-brace-format flag set if the key
+        appears to be using brace formatting.
+        """
+
+        message_ids = (message.id,) if isinstance(message.id, str) else message.id
+        if not any(
+            field_name
+            for message_id in message_ids
+            for field_name in parse_brace_field_names(message_id)
+        ):
+            return
+
+        if "python-brace-format" not in message.flags:
+            self.emit_error(
+                "Translation uses brace formatting, but is not flagged with "
+                "python-brace-format"
+            )
+
+    def check_brace_format(self, message: Message) -> None:
+        """
+        Check that any brace formatting present in the translations are also
+        present in the key.
+        """
+
+        message_ids = (message.id,) if isinstance(message.id, str) else message.id
+        message_strings = (
+            (message.string,) if isinstance(message.string, str) else message.string
+        )
+
+        for message_id, message_string in zip(message_ids, message_strings):
+            self._check_brace_format(message_id, message_string, message.flags)
+
+    def _check_brace_format(
+        self, message_id: str, message_string: str, flags: set[str]
+    ) -> None:
+        """
+        Check that any brace formatted field names used in the message string
+        is also defined in the message key.
+        """
+
+        id_field_names = {
+            field_name for field_name in parse_brace_field_names(message_id)
+        }
+
+        # Extract all field names that are defined in the translation string
+        string_field_names = {
+            field_name for field_name in parse_brace_field_names(message_string)
+        }
+        if not string_field_names:
+            return
+
+        self._check_fields(id_field_names, string_field_names)
+
+    def check_missing_interpolate_format_flag(self, message: Message) -> None:
+        """
+        Check that the message has the python-format flag set if the key
+        appears to be using interpolation formatting.
+
+        NOTE: This check doesn't really do anything, because babel
+        automatically adds the flag if the translation contains interpolations.
+        """
+
+        message_ids = (message.id,) if isinstance(message.id, str) else message.id
+        if not any(
+            field_name
+            for message_id in message_ids
+            for field_name in parse_interpolate_field_names(message_id)
+        ):
+            return
+
+        if "python-format" not in message.flags:
+            print("Missing flag!")
+            self.emit_error(
+                "Translation uses brace interpolation formatting, but is not "
+                "flagged with python-format"
+            )
+
+    def check_interpolate_format(self, message: Message) -> None:
+        """
+        Check that any brace formatting present in the translations are also
+        present in the key.
+        """
+
+        message_ids = (message.id,) if isinstance(message.id, str) else message.id
+        message_strings = (
+            (message.string,) if isinstance(message.string, str) else message.string
+        )
+
+        for message_id, message_string in zip(message_ids, message_strings):
+            self._check_interpolate_format(message_id, message_string, message.flags)
+
+    def _check_interpolate_format(
+        self, message_id: str, message_string: str, flags: set[str]
+    ) -> None:
+
+        id_field_names = {
+            field_name for field_name in parse_interpolate_field_names(message_id)
+        }
+
+        # Extract all field names that are defined in the translation string
+        string_field_names = {
+            field_name for field_name in parse_interpolate_field_names(message_string)
+        }
+        if not string_field_names:
+            return
+
+        self._check_fields(id_field_names, string_field_names)
+
+    def _check_fields(
+        self, id_field_names: set[str], string_field_names: set[str]
+    ) -> None:
+
+        missing_field_names = [
+            field_name
+            for field_name in string_field_names
+            if field_name not in id_field_names
+        ]
+        if len(missing_field_names) > 1:
+            *rest, last = reversed(missing_field_names)
+            field_names = ", ".join(f'"{field_name}"' for field_name in rest)
+            self.emit_error(
+                f'Field names {field_names} and "{last}" are not present in '
+                f"the message id"
+            )
+        elif missing_field_names:
+            field_name = missing_field_names[0]
+            self.emit_error(
+                f'Field name "{field_name}" is not present in the message id'
+            )
+
+    def check(self) -> bool:
+        """
+        Run all checks and return True if errors were found
+        """
+
+        print(f"🔍 Checking {self.path} ... ")
+
+        checkers = list(attr for attr in dir(self) if attr.startswith("check_"))
+        for message in self.catalog:
+            self.message = message
+            for checker in checkers:
+                getattr(self, checker)(message)
+            self.message = None
+
+        if self.has_errors:
+            print("💪 Looks like there some things to improve here")
+        else:
+            print("🤩 No problems found!")
+
+        return self.has_errors
+
+
+def check(paths: list[Path]) -> None:
+    """
+    Run linter-style checks on the translation files.
+    """
+
+    has_errors = False
+
+    files_to_check: list[Path] = []
+
+    for path in paths:
+        if path.is_dir():
+            for file in path.glob("**/*.po"):
+                files_to_check.append(file)
+        else:
+            files_to_check.append(path)
+
+    for file in files_to_check:
+        if Checker(file).check():
+            has_errors = True
+
+    if has_errors:
+        sys.exit(1)
+
+
+#######################
+# Compare sub-command #
+#######################
+
+
+def format_comment(comment: str, /, prefix="#") -> str:
+    """Wrap a comment over multiple lines"""
+
+    return "\n".join(f"{prefix} {line}" for line in wraptext(comment, 76))
+
+
+def format_message(message: Message, obsolete: bool = False) -> str:
+    """
+    Format a single message in .po format.
+    """
+
+    prefix = "#~ " if obsolete else ""
+
+    bits = []
+
+    for comment in message.user_comments:
+        bits.append(format_comment(comment))
+
+    for comment in message.auto_comments:
+        bits.append(format_comment(comment, prefix="#."))
+
+    for file, line in sorted(message.locations):
+        bits.append(f"#: {file}:{line}" if line is not None else file)
+
+    for flag in sorted(message.flags):
+        bits.append(f"#, {flag}")
+
+    if message.context:
+        bits.append(f"{prefix}msgctxt {normalize(message.context, prefix)}")
+
+    if isinstance(message.id, (list, tuple)):
+        bits.append(f"{prefix}msgid {normalize(message.id[0], prefix)}")
+        bits.append(f"{prefix}msgid_plural {normalize(message.id[1], prefix)}")
+
+        for idx, string in enumerate(message.string):
+            bits.append(f"{prefix}msgstr[{idx}] {normalize(string, prefix)}")
+    else:
+        bits.append(f"{prefix}msgid {normalize(message.id, prefix)}")
+        bits.append(f"{prefix}msgstr {normalize(message.string or '', prefix)}")
+
+    return "\n".join(bits)
+
+
+def format_message_diff(previous: Message, current: Message) -> str:
+    """
+    Create a diff between two messages in .po format.
+    """
+
+    prefix = ""
+
+    bits = []
+
+    for comment in current.user_comments:
+        if comment in previous.user_comments:
+            bits.append(format_comment(comment))
+        else:
+            bits.append(format_comment(comment, prefix="+#"))
+
+    for comment in previous.user_comments:
+        if comment not in current.user_comments:
+            bits.append(format_comment(comment, prefix="-#"))
+
+    for comment in current.auto_comments:
+        if comment in previous.auto_comments:
+            bits.append(format_comment(comment, prefix="#."))
+        else:
+            bits.append(format_comment(comment, prefix="+#."))
+
+    for comment in previous.auto_comments:
+        if comment not in current.auto_comments:
+            bits.append(format_comment(comment, prefix="-#,"))
+
+    for file, line in sorted(set(current.locations) | set(previous.locations)):
+        if (file, line) in current.locations and (file, line) in previous.locations:
+            bits.append(f"#: {file}:{line}" if line is not None else file)
+        elif (file, line) in previous.locations:
+            bits.append(f"-#: {file}:{line}" if line is not None else file)
+        else:
+            bits.append(f"+#: {file}:{line}" if line is not None else file)
+
+    for flag in sorted(previous.flags | current.flags):
+        if flag in previous.flags and flag in current.flags:
+            bits.append(f"#, {flag}")
+        elif flag in previous.flags:
+            bits.append(f"-#, {flag}")
+        else:
+            bits.append(f"+#, {flag}")
+
+    if previous.context != current.context:
+        bits.append(f"-{prefix}msgctxt {normalize(previous.context, '-' + prefix)}")
+        bits.append(f"+{prefix}msgctxt {normalize(current.context, '+' + prefix)}")
+    elif current.context:
+        bits.append(f"{prefix}msgctxt {normalize(current.context, prefix)}")
+
+    if isinstance(previous.id, (list, tuple)):
+        previous_id: str = previous.id[0]
+        previous_plural_id: str | None = previous.id[1]
+    else:
+        previous_id = previous.id
+        previous_plural_id = None
+
+    if isinstance(current.id, (list, tuple)):
+        current_id: str = current.id[0]
+        current_plural_id: str | None = current.id[1]
+    else:
+        current_id = current.id
+        current_plural_id = None
+
+    if previous_id != current_id:
+        bits.append(f"-{prefix}msgid {normalize(previous_id, '-' + prefix)}")
+        bits.append(f"+{prefix}msgid {normalize(current_id, '+' + prefix)}")
+    else:
+        bits.append(f"{prefix}msgid {normalize(current_id, prefix)}")
+
+    if current_plural_id != previous_plural_id:
+        if previous_plural_id:
+            bits.append(
+                f"-{prefix}msgid_plural {normalize(previous_plural_id, '-' + prefix)}"
+            )
+        if current_plural_id:
+            bits.append(
+                f"+{prefix}msgid_plural {normalize(current_plural_id, '+' + prefix)}"
+            )
+
+    is_previous_list = isinstance(previous.string, (list, tuple))
+    is_current_list = isinstance(previous.string, (list, tuple))
+
+    if is_previous_list and is_current_list:
+        for idx, (previous_string, current_string) in enumerate(
+            zip_longest(previous.string, current.string)
+        ):
+            if previous_string != current_string:
+                if previous_string:
+                    bits.append(
+                        f"-{prefix}msgstr[{idx}] {normalize(previous_string, '-' + prefix)}"  # noqa
+                    )
+                if current_string:
+                    bits.append(
+                        f"+{prefix}msgstr[{idx}] {normalize(current_string, '+' + prefix)}"  # noqa
+                    )
+            else:
+                bits.append(
+                    f"{prefix}msgstr[{idx}] {normalize(current_string, prefix)}"
+                )
+    elif is_current_list:
+        bits.append(f"-{prefix}msgstr {normalize(previous.string or '', '-' + prefix)}")
+        for idx, string in enumerate(current.string):
+            bits.append(f"+{prefix}msgstr[{idx}] {normalize(string, '+' + prefix)}")
+    elif is_previous_list:
+        for idx, string in enumerate(previous.string):
+            bits.append(f"-{prefix}msgstr[{idx}] {normalize(string, '-' + prefix)}")
+        bits.append(f"+{prefix}msgstr {normalize(current.string or '', '+' + prefix)}")
+    elif current.string != previous.string:
+        bits.append(f"-{prefix}msgstr {normalize(previous.string or '', '-' + prefix)}")
+        bits.append(f"+{prefix}msgstr {normalize(current.string or '', '+' + prefix)}")
+    else:
+        bits.append(f"{prefix}msgstr {normalize(current.string or '', prefix)}")
+
+    return "\n".join(bits)
+
+
+def post_github_comment(
+    diffs: dict[Path, str], api_key: str, repo: str, pull_number: int
+) -> None:
+    """
+    Post a comment with the provided diffs
+    """
+
+    header = (
+        "Hi there, it looks like made changes to the translations in this PR 🌍 "
+        "Below is a summary of the changes:"
+    )
+    changes = [
+        dedent(
+            """\
+            <details><summary><strong>{path}</strong></summary>
+
+            ```diff
+            {diff}
+            ```
+
+            </details>
+            """
+        ).format(path=path, diff=diff)
+        for path, diff in diffs.items()
+    ]
+    footer = (
+        "Once you are happy with the changes, please add the `needs translations` "
+        "label to the pull request to have these uploaded to Lokalise."
+    )
+
+    body = "\n\n".join((header, *changes, footer))
+
+    # TODO: Post comment on PR
+    print(body)
+
+
+def print_diff(path: Path, diff: str) -> None:
+    """
+    Print the given diffs to the terminal (with colors)
+    """
+
+    # print(magenta("Changes in"), magenta(path))
+
+    for line in diff.splitlines():
+        if line.startswith("-"):
+            print(red(line))
+        elif line.startswith("+"):
+            print(green(line))
+        else:
+            print(line)
+
+
+def compare(
+    paths: list[Path],
+    *,
+    base_commit: str,
+    github_api_key: str | None,
+    github_repo: str | None,
+    github_pull_number: int | None,
+) -> None:
+
+    diffs: dict[Path, str] = {}
+
+    files_to_check: list[Path] = []
+    for path in paths:
+        if path.is_dir():
+            files_to_check += path.glob("**/*.po")
+        else:
+            files_to_check.append(path)
+
+    for path in files_to_check:
+        print(f"🔍 Comparing {path}")
+
+        with open(path) as f:
+            current = read_po(f)
+
+        previous = load_from_git(path=path, base_commit=base_commit)
+        added, updated, removed = diff_catalogs(previous, current)
+
+        # Build a diff off the changes made to the file
+        messages: list[str] = []
+        for key in sorted(added | updated | removed):
+            if key in added:
+                messages.append(indent(format_message(current[key]), "+"))
+            if key in updated:
+                messages.append(format_message_diff(previous[key], current[key]))
+            if key in removed:
+                messages.append(indent(format_message(previous[key]), "-"))
+
+        diff = "\n\n".join(messages)
+        if diff:
+            diffs[path] = diff
+
+        print_diff(path, diff)
+
+    # Post a comment on the GitHub oull request, showing the diff.
+    if diffs and github_api_key and github_repo and github_pull_number:
+        post_github_comment(
+            diffs,
+            api_key=github_api_key,
+            repo=github_repo,
+            pull_number=github_pull_number,
+        )
+
+
+#######################
+# Compile sub-command #
+#######################
+
+
+def compile() -> None:
+    """
+    Compile all .po files to .mo files
+    """
+
+    sys.exit("Compiling is not implemented yet")
+
+
+#######################
+# Extract sub-command #
+#######################
+
+
+def extract() -> None:
+    """
+    Extract translations from the source code and update the existing
+    translation catalogs.
+    """
+
+    method_map = {
+        "**/templates/**.*": extract_django,
+        "**.py": "python",
+    }
+
+    extracted: Iterator[tuple[str, int, str | tuple[str, ...], list[str], list[str]]]
+    extracted = extract_from_dir(  # type: ignore
+        Path("."),
+        method_map=method_map.items(),
+        comment_tags=["Translators:"],
+        strip_comment_tags=True,
+    )
+
+    template = Catalog(charset="utf-8", fuzzy=False)
+    for filename, lineno, message, comments, context in extracted:
+        template.add(
+            message, None, [(filename, lineno)], auto_comments=comments, context=context
+        )
+
+    for path in Path(".").glob("project/locale/**/*.po"):
+        with open(path, "rb") as f:
+            catalog = read_po(f)
+        catalog.update(template)
+
+        with open(path, "wb") as f:
+            write_po(f, catalog)
+
+
+######################
+# Upload sub-command #
+######################
+
+
+def upload_to_lokalise(
+    catalog: Catalog, /, project_id: str, api_token: str, filename: str, tags: list[str]
+) -> None:
+    """
+    Upload the given catalog to Lokalise
+    """
+
+    buf = BytesIO()
+    write_po(buf, catalog, omit_header=True)
+    file_contents = b64encode(buf.getvalue()).decode()
+
+    url = f"https://api.lokalise.com/api2/projects/{project_id}/files/upload"
+    data = {
+        "data": file_contents,
+        "filename": filename,
+        "lang_iso": catalog.locale.language,
+        "convert_placeholders": False,
+        "tags": tags,
+        "tag_inserted_keys": True,
+        "tag_updated_keys": True,
+        "replace_modified": True,
+    }
+
+    pprint(request("POST", url, headers={"x-api-token": api_token}, data=data))
+
+
+def upload(
+    paths: list[Path],
+    *,
+    base_commit: str,
+    lokalise_project_id: str,
+    lokalise_api_token: str,
+    lokalise_tags: list[str],
+) -> None:
+    """
+    Upload changed translations for the given files to Lokalise.
+    """
+
+    files_to_upload: list[Path] = []
+    for path in paths:
+        if path.is_dir():
+            files_to_upload += path.glob("**/*.po")
+        else:
+            files_to_upload.append(path)
+
+    for path in files_to_upload:
+        print(f"📡 Uploading {path}")
+
+        with open(path) as f:
+            current = read_po(f)
+
+        previous = load_from_git(path=path, base_commit=base_commit)
+        added, updated, _removed = diff_catalogs(previous, current)
+
+        # Upload changed translations to Lokalise. We do this by creating a new
+        # catalog with only the changed translations and then upload that through
+        # the Lokalise API.
+        catalog = Catalog(locale=current.locale)
+        for key in added | updated:
+            catalog[key] = current[key]
+
+        upload_to_lokalise(
+            catalog,
+            filename=str(path),
+            project_id=lokalise_project_id,
+            api_token=lokalise_api_token,
+            tags=lokalise_tags,
+        )
+
+
+####################
+# Main entry point #
+####################
+
+
+def existing_path(value: str) -> Path:
+    """
+    Type helper for arguments that should be a path to a file or directory that eixsts.
+    """
+
+    path = Path(value)
+    if not path.exists():
+        raise ArgumentTypeError(f'File or directory "{value}" does not exist')
+
+    return path
+
+
+def main() -> None:
+    """
+    Main entry point of the command. This is responsible for parsing arguments
+    and calling the correct sub-command.
+    """
+
+    parser = ArgumentParser(description="Tools for working with translations")
+
+    subparsers = parser.add_subparsers(required=True, title="commmands")
+
+    #
+    # Arguments to the check command
+    #
+
+    check_cmd = subparsers.add_parser(
+        "check", help="Run linting checks on translations"
+    )
+    check_cmd.set_defaults(func=check)
+    check_cmd.add_argument(
+        "paths",
+        nargs="*",
+        metavar="path",
+        type=existing_path,
+        help=(
+            "Path to file or directories to check. If the argument is a directory "
+            "we recusively check all .po files"
+        ),
+    )
+
+    #
+    # Arguments to the compare command
+    #
+
+    compare_cmd = subparsers.add_parser(
+        "compare", help="Find differences between to different translations files"
+    )
+    compare_cmd.set_defaults(func=compare)
+    compare_cmd.add_argument(
+        "paths",
+        nargs="*",
+        metavar="path",
+        type=existing_path,
+        help=(
+            "Path to file or directories to compare. If the argument is a directory "
+            "we recusively compare all .po files"
+        ),
+    )
+    compare_cmd.add_argument(
+        "--base-commit",
+        help="A git commit hash to check for changes against",
+        required=True,
+        metavar="GIT_REVISION",
+    )
+
+    github_args = compare_cmd.add_argument_group(
+        "Github",
+        "If these arguments are provided a comment is made on the pull request",
+    )
+    github_args.add_argument("--github-api-key", default=None, metavar="API_KEY")
+    github_args.add_argument("--github-repo", default=None, metavar="REPO")
+    github_args.add_argument(
+        "--github-pull-number", type=int, default=None, metavar="PULL_NUMBER"
+    )
+    #
+    # Arguments to the compile command
+    #
+
+    compile_cmd = subparsers.add_parser(
+        "compile", help="Compile .po files to .mo files"
+    )
+    compile_cmd.set_defaults(func=compile)
+
+    #
+    # Arguments to the extract command
+    #
+
+    extract_cmd = subparsers.add_parser(
+        "extract", help="Extract translations from source code"
+    )
+    extract_cmd.set_defaults(func=extract)
+
+    #
+    # Arguments to the upload command
+    #
+
+    upload_cmd = subparsers.add_parser("upload", help="Upload translations to Lokalise")
+    upload_cmd.set_defaults(func=upload)
+    upload_cmd.add_argument(
+        "--base-commit",
+        help="A git commit hash to check for changes against",
+        required=True,
+        metavar="GIT_REVISION",
+    )
+    upload_cmd.add_argument(
+        "paths",
+        nargs="*",
+        metavar="path",
+        type=existing_path,
+        help=(
+            "Path to file or directories to upload. If the argument is a directory "
+            "we recusively upload all .po files"
+        ),
+    )
+
+    lokalise_args = upload_cmd.add_argument_group("Lokalise")
+    lokalise_args.add_argument(
+        "--lokalise-project-id", required=True, metavar="PROJECT_ID"
+    )
+    lokalise_args.add_argument(
+        "--lokalise-api-token", required=True, metavar="API_TOKEN"
+    )
+    lokalise_args.add_argument(
+        "--lokalise-tag",
+        help="Tags to add to translation in Lokalise",
+        default=[],
+        metavar="TAG",
+        action="append",
+        dest="lokalise_tags",
+    )
+
+    # Parse args and call the handler for the given sub-comamnd
+    args = parser.parse_args()
+    args.func(
+        **{
+            attr: getattr(args, attr)
+            for attr in dir(args)
+            if not attr.startswith("_") and not attr == "func"
+        }
+    )
+
+
+if __name__ == "__main__":
+    main()

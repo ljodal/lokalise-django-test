@@ -38,7 +38,6 @@ msgstr "world"
 
 #. This is a comment for translators
 #: project/templates/test.html:4
-#, python-format
 msgid "Hello world %(my_var)s"
 msgstr "Hei verden"
 
