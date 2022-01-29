@@ -17,13 +17,13 @@ concurrency:
 
 jobs:
 
-  # Upload translations to Lokalise if the PR has the "needs translations"
-  # label. This label is used as the signal from developers that the PR is
-  # ready for translations.
+  # Upload translations to Lokalise when the "needs translations" label is
+  # added. We only run this when the label is added because any changes made in
+  # Lokalise will be overwritten if this runs multiple times.
   upload-to-lokalise:
     name: Upload translations
     runs-on: ubuntu-latest
-    if: contains(github.event.pull_request.labels.*.name, 'needs translations')
+    if: ${{ github.event.action == 'labeled' && github.event.label.name == 'needs translations' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v2
@@ -99,8 +99,7 @@ jobs:
       - name: Check for changes
         id: check
         run: |
-          git diff
-          if [[ `git status --porcelain --untraced-files=no` ]]; then
+          if [[ `git status --porcelain --untracked-files=no` ]]; then
             echo "::set-output name=has_changes::false"
           else
             echo "::set-output name=has_changes::true"
