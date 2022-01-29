@@ -10,6 +10,7 @@ Tools to interact with translations in the project. The main tools provided are:
 """
 import functools
 import json
+import os
 import re
 import subprocess
 import sys
@@ -24,6 +25,7 @@ from string import Formatter
 from textwrap import dedent, indent
 from typing import IO, Any, Iterator, Optional
 from urllib.request import Request, urlopen
+from zipfile import ZipFile
 
 from babel.messages import Catalog, Message
 from babel.messages.extract import extract_from_dir
@@ -108,6 +110,23 @@ def diff_catalogs(
     return added_keys, updated_keys, removed_keys
 
 
+def write_catalog(path: Path, catalog: Catalog) -> None:
+    """
+    Write a catalog to the given path.
+    """
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    buf = BytesIO()
+    write_po(buf, catalog)
+    buf.seek(0)
+
+    with open(path, "wb") as f:
+        for line in buf:
+            if not line.startswith(b'"POT-Creation-Date:'):
+                f.write(line)
+
+
 def request(method: str, url: str, /, headers: dict[str, str], data: dict) -> Any:
     """
     Perform an HTTP request
@@ -116,11 +135,11 @@ def request(method: str, url: str, /, headers: dict[str, str], data: dict) -> An
     req = Request(
         url,
         method=method,
-        headers=headers,
+        headers={"content-type": "application/json", **headers},
         data=json.dumps(data).encode("utf-8"),
     )
 
-    with urlopen(req) as response:
+    with urlopen(req, timeout=5.0) as response:
         assert isinstance(response, HTTPResponse)
         assert "json" in response.getheader("content-type", "")
         return json.loads(response.read())
@@ -951,12 +970,66 @@ def compile() -> None:
     sys.exit("Compiling is not implemented yet")
 
 
+########################
+# Download sub-command #
+########################
+
+
+def download(
+    paths: list[Path],
+    output: Path,
+    lokalise_project_id: str,
+    lokalise_api_token: str,
+) -> None:
+    """
+    Download translations from Lokalise.
+    """
+
+    template = extract_translations(*paths)
+
+    print("🌍 Requesting translations from Lokalise")
+
+    data = request(
+        "POST",
+        f"https://api.lokalise.com/api2/projects/{lokalise_project_id}/files/download",
+        headers={"x-api-token": lokalise_api_token},
+        data={
+            "format": "po",
+            "original_filenames": True,
+            "filter_data": ["translated", "verified"],
+        },
+    )
+    assert isinstance(data, dict)
+    assert "project_id" in data
+    assert "bundle_url" in data
+    assert data["project_id"] == lokalise_project_id
+    url = data["bundle_url"]
+
+    with urlopen(url, timeout=5.0) as response:
+        zip_file = ZipFile(BytesIO(response.read()))
+        for filepath in zip_file.namelist():
+            _, filename = os.path.split(filepath)
+            if not filename.endswith(".po"):
+                continue
+
+            with zip_file.open(filepath) as f:
+                catalog = read_po(f)
+
+            language = catalog.locale.language
+            path = output / language / "LC_MESSAGES" / filename
+
+            catalog.update(template, no_fuzzy_matching=True)
+
+            print(f"💾 Updating {path}")
+            write_catalog(path, catalog)
+
+
 #######################
 # Extract sub-command #
 #######################
 
 
-def extract_translations(path: Path) -> Catalog:
+def extract_translations(*paths: Path) -> Catalog:
     """
     Extract translations from source and return a template catalog, ie. a
     catalog with only message ids, no translations.
@@ -969,48 +1042,50 @@ def extract_translations(path: Path) -> Catalog:
         "**.py": "python",
     }
 
-    extracted: Iterator[tuple[str, int, str | tuple[str, ...], list[str], list[str]]]
-    extracted = extract_from_dir(  # type: ignore
-        Path("."),
-        method_map=method_map.items(),
-        comment_tags=["Translators:"],
-        strip_comment_tags=True,
-    )
-
     template = Catalog(charset="utf-8", fuzzy=False)
-    for filename, lineno, message, comments, context in extracted:
-        template.add(
-            message, None, [(filename, lineno)], auto_comments=comments, context=context
+
+    extracted: Iterator[tuple[str, int, str | tuple[str, ...], list[str], list[str]]]
+
+    for path in paths:
+        extracted = extract_from_dir(  # type: ignore
+            path,
+            method_map=method_map.items(),
+            comment_tags=["Translators:"],
+            strip_comment_tags=True,
         )
+
+        for filename, lineno, message, comments, context in extracted:
+            template.add(
+                message,
+                None,
+                [(filename, lineno)],
+                auto_comments=comments,
+                context=context,
+            )
 
     return template
 
 
-def extract() -> None:
+def extract(paths: list[Path], output: Path) -> None:
     """
     Extract translations from the source code and update the existing
     translation catalogs.
     """
 
-    template = extract_translations(Path("."))
+    template = extract_translations(*paths)
 
-    for path in Path(".").glob("project/locale/**/*.po"):
+    files_to_update = list(output.glob("**/*.po")) if output.is_dir() else [output]
+
+    for path in files_to_update:
 
         print(f"💾 Updating {path}")
 
         with open(path, "rb") as f:
             catalog = read_po(f)
 
-        catalog.update(template)
+        catalog.update(template, no_fuzzy_matching=True)
 
-        buf = BytesIO()
-        write_po(buf, catalog)
-        buf.seek(0)
-
-        with open(path, "wb") as f:
-            for line in buf:
-                if not line.startswith(b'"POT-Creation-Date:'):
-                    f.write(line)
+        write_catalog(path, catalog)
 
 
 ######################
@@ -1064,13 +1139,18 @@ def upload(
             files_to_upload.append(path)
 
     for path in files_to_upload:
-        print(f"📡 Uploading {path}")
 
         with open(path) as f:
             current = read_po(f)
 
         previous = load_from_git(path=path, base_commit=base_commit)
         added, updated, _removed = diff_catalogs(previous, current)
+
+        if not (added or updated):
+            print(f"Skipping {path}, no changes")
+            continue
+
+        print(f"📡 Uploading {path}")
 
         # Upload changed translations to Lokalise. We do this by creating a new
         # catalog with only the changed translations and then upload that through
@@ -1105,6 +1185,18 @@ def existing_path(value: str) -> Path:
     return path
 
 
+def directory(value: str) -> Path:
+    """
+    Type helper for arguments that should be a directory (if the file already exists)
+    """
+
+    path = Path(value)
+    if path.exists() and not path.is_dir():
+        raise ArgumentTypeError("Must be a directory")
+
+    return path
+
+
 def main() -> None:
     """
     Main entry point of the command. This is responsible for parsing arguments
@@ -1125,7 +1217,7 @@ def main() -> None:
     check_cmd.set_defaults(func=check)
     check_cmd.add_argument(
         "paths",
-        nargs="*",
+        nargs="+",
         metavar="path",
         type=existing_path,
         help=(
@@ -1144,7 +1236,7 @@ def main() -> None:
     compare_cmd.set_defaults(func=compare)
     compare_cmd.add_argument(
         "paths",
-        nargs="*",
+        nargs="+",
         metavar="path",
         type=existing_path,
         help=(
@@ -1178,6 +1270,35 @@ def main() -> None:
     compile_cmd.set_defaults(func=compile)
 
     #
+    # Arguments for the download command
+    #
+
+    download_cmd = subparsers.add_parser(
+        "download", help="Download translations from Lokalise"
+    )
+    download_cmd.set_defaults(func=download)
+    download_cmd.add_argument(
+        "paths",
+        nargs="+",
+        type=existing_path,
+        help="Paths to extract to translations from",
+    )
+    download_cmd.add_argument(
+        "--output",
+        required=True,
+        type=directory,
+        help="Directory to download translations to",
+    )
+
+    lokalise_args = download_cmd.add_argument_group("Lokalise")
+    lokalise_args.add_argument(
+        "--lokalise-project-id", required=True, metavar="PROJECT_ID"
+    )
+    lokalise_args.add_argument(
+        "--lokalise-api-token", required=True, metavar="API_TOKEN"
+    )
+
+    #
     # Arguments to the extract command
     #
 
@@ -1185,6 +1306,18 @@ def main() -> None:
         "extract", help="Extract translations from source code"
     )
     extract_cmd.set_defaults(func=extract)
+    extract_cmd.add_argument(
+        "paths",
+        nargs="+",
+        type=existing_path,
+        help="Paths to extract to translations from",
+    )
+    extract_cmd.add_argument(
+        "--output",
+        required=True,
+        type=Path,
+        help="File or directory to write extracted translations to",
+    )
 
     #
     # Arguments to the upload command
