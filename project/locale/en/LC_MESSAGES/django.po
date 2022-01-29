@@ -21,44 +21,22 @@ msgstr "Norwegian"
 msgid "English"
 msgstr "Foo"
 
-#: project/app/views.py
-msgid "Foo"
-msgstr "Foo"
-
 #. This is a test
 #: project/app/views.py
 #, python-brace-format
 msgid "Hello {name}, I'm Django!"
 msgstr "Hello {name}, I'm Django!"
 
-#: project/app/views.py
+#: project/app/views.py project/app/views.py
 msgid "world"
 msgstr "world"
 
-#. This is a comment for translators
-#: project/templates/test.html
+#: project/app/templates/test.html
 #, python-format
-msgid "Hello world %(my_var)s"
-msgstr "Hello world %(my_var)s"
+msgid "Hello %(name)s"
+msgstr ""
 
-#: project/templates/test.html
-msgid "test in loop"
-msgstr "test in loop"
-
-#. This is a comment for you!
-#. Another comment
-#. It goes over multiple lines
-#: project/templates/test.html
-msgid "test"
-msgstr "test"
-
-#. 1
-#. 2
-#: project/templates/test.html
-msgid "test 2"
-msgstr "test 2"
-
-#: project/templates/test.html
-msgid "test 3"
-msgstr "test 3"
+#: project/app/templates/test.html
+msgid "How cool isn't this?"
+msgstr ""
 
