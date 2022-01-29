@@ -6,6 +6,7 @@ from django.utils.translation import gettext as _
 def my_view(request: HttpRequest) -> HttpResponse:
     print(get_language())
     print(_("Foo"))
+    print(_("Hum?"))
 
     # Translators: This is a test
     text = _("Hello {name}, I'm Django!").format(
