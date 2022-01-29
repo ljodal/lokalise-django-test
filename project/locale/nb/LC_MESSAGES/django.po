@@ -27,7 +27,7 @@ msgstr "Foo"
 
 #: project/app/views.py:9
 msgid "Hum?"
-msgstr ""
+msgstr "How?"
 
 #. This is a test
 #: project/app/views.py:12
