@@ -133,37 +133,18 @@ jobs:
     runs-on: ubuntu-latest
     if: ${{ contains('opened synchronize reopened', github.event.action) && !contains(github.event.pull_request.labels.*.name, 'needs translations') }}
     steps:
-      - name: Comment on PR
-        uses: actions/github-script@v5
+      - name: Checkout
+        uses: actions/checkout@v2
         with:
-          script: |
-            const markerComment = "<!-- translations bot -->";
-
-            const issue_number = context.payload.pull_request.number;
-            const {data: comments} = await github.rest.issues.listComments({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: issue_number,
-            });
-
-            // Only comment if we haven't already done so
-            if (comments.some(comment => comment.body.includes(markerComment))) {
-              return;
-            }
-
-            const runLink = `${context.serverUrl}/${context.payload.repository.full_name}/actions/runs/${context.runId}`;
-
-            const commentText = `
-            Howdy 👋 It looks like this pull request contains changes to translations. When your PR is ready please add the \`needs translations\` label to the PR. The translations will then be automatically uploaded to Lokalise.
-
-            _This comment was posted by [this workflow](${runLink})._
-
-            ${markerComment}
-            `;
-
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: issue_number,
-              body: commentText,
-            });
+          ref: ${{ github.head_ref }}
+          token: ${{ secrets.GH_ACCESS_TOKEN }}
+      - name: Setup project
+        uses: ./.github/actions/setup-project
+      - name: Compare translations and comment on PR
+        run: |
+          ./bin/translations compare ./project \
+            --base-commit "${{ github.event.pull_request.head.sha }}" \
+            --github-access-token "${{ secrets.GITHUB_TOKEN }}" \
+            --github-repo "${{ github.repository }}" \
+            --github-pull-number "${{ github.event.pull_request.number }}" \
+            --github-workflow-link "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"

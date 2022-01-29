@@ -118,7 +118,7 @@ def write_catalog(path: Path, catalog: Catalog) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
     buf = BytesIO()
-    write_po(buf, catalog)
+    write_po(buf, catalog, ignore_obsolete=True)
     buf.seek(0)
 
     with open(path, "wb") as f:
@@ -127,7 +127,9 @@ def write_catalog(path: Path, catalog: Catalog) -> None:
                 f.write(line)
 
 
-def request(method: str, url: str, /, headers: dict[str, str], data: dict) -> Any:
+def request(
+    method: str, url: str, /, headers: dict[str, str], data: dict | None = None
+) -> Any:
     """
     Perform an HTTP request
     """
@@ -136,7 +138,7 @@ def request(method: str, url: str, /, headers: dict[str, str], data: dict) -> An
         url,
         method=method,
         headers={"content-type": "application/json", **headers},
-        data=json.dumps(data).encode("utf-8"),
+        data=json.dumps(data).encode("utf-8") if data else None,
     )
 
     with urlopen(req, timeout=5.0) as response:
@@ -864,7 +866,11 @@ def format_message_diff(previous: Message, current: Message) -> str:
 
 
 def post_github_comment(
-    diffs: dict[Path, str], api_key: str, repo: str, pull_number: int
+    diffs: dict[Path, str],
+    access_token: str,
+    repo: str,
+    pull_number: int,
+    workflow_link: str | None,
 ) -> None:
     """
     Post a comment with the provided diffs
@@ -890,13 +896,47 @@ def post_github_comment(
     ]
     footer = (
         "Once you are happy with the changes, please add the `needs translations` "
-        "label to the pull request to have these uploaded to Lokalise."
+        "label to the pull request. This will trigger "
+    )
+    workflow_link = (
+        f"_This comment was posted by [this workflow]({workflow_link})."
+        if workflow_link
+        else ""
+    )
+    marker = "<!-- translations diff bot -->"
+
+    body = "\n\n".join((header, *changes, footer, workflow_link, marker))
+
+    url = f"https://api.github.com/repos/{repo}/issues/{pull_number}/comments"
+    headers = {
+        "accept": "application/vnd.github.v3+json",
+        "Authorization": f"Bearer {access_token}",
+        "Content-type": "application/json; charset=UTF-8",
+    }
+
+    # Check if we've previously commented on the pull request
+    comments = request("GET", url, headers=headers)
+    comment = next(
+        (comment for comment in comments if marker in comment["body"]),
+        None,
     )
 
-    body = "\n\n".join((header, *changes, footer))
-
-    # TODO: Post comment on PR
-    print(body)
+    if comment:
+        comment_id = comment["id"]
+        if comment["body"] != body:
+            request(
+                "PATCH",
+                f"/repos/{repo}/issues/comments/{comment_id}",
+                headers=headers,
+                data={"body": body},
+            )
+    else:
+        request(
+            "POST",
+            f"/repos/{repo}/issues/comments",
+            headers=headers,
+            data={"body": body},
+        )
 
 
 def print_diff(path: Path, diff: str) -> None:
@@ -919,9 +959,10 @@ def compare(
     paths: list[Path],
     *,
     base_commit: str,
-    github_api_key: str | None,
+    github_access_token: str | None,
     github_repo: str | None,
     github_pull_number: int | None,
+    github_workflow_link: str | None,
 ) -> None:
 
     diffs: dict[Path, str] = {}
@@ -959,12 +1000,13 @@ def compare(
         print_diff(path, diff)
 
     # Post a comment on the GitHub oull request, showing the diff.
-    if diffs and github_api_key and github_repo and github_pull_number:
+    if diffs and github_access_token and github_repo and github_pull_number:
         post_github_comment(
             diffs,
-            api_key=github_api_key,
+            access_token=github_access_token,
             repo=github_repo,
             pull_number=github_pull_number,
+            workflow_link=github_workflow_link,
         )
 
 
@@ -1275,11 +1317,13 @@ def main() -> None:
         "Github",
         "If these arguments are provided a comment is made on the pull request",
     )
-    github_args.add_argument("--github-api-key", default=None, metavar="API_KEY")
+    github_args.add_argument("--github-access-token", default=None, metavar="TOKEN")
     github_args.add_argument("--github-repo", default=None, metavar="REPO")
     github_args.add_argument(
         "--github-pull-number", type=int, default=None, metavar="PULL_NUMBER"
     )
+    github_args.add_argument("--github-workflow-link", default=None, metavar="URL")
+
     #
     # Arguments to the compile command
     #
