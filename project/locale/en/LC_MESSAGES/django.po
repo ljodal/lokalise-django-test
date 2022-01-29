@@ -25,13 +25,17 @@ msgstr "Foo"
 msgid "Foo"
 msgstr "Foo"
 
+#: project/app/views.py:9
+msgid "Hum?"
+msgstr ""
+
 #. This is a test
-#: project/app/views.py:11
+#: project/app/views.py:12
 #, python-brace-format
 msgid "Hello {name}, I'm Django!"
 msgstr "Hello {name}, I'm Django!"
 
-#: project/app/views.py:12
+#: project/app/views.py:13
 msgid "world"
 msgstr "world"
 
