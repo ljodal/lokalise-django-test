@@ -89,6 +89,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v2
+        with:
+          ref: ${{ github.head_ref }}
       - name: Setup project
         uses: ./.github/actions/setup-project
       - name: Download translations
@@ -113,7 +115,7 @@ jobs:
         run: |
           git add -u
           git commit -m "Add translations from GitHub"
-          git push origin "HEAD:${{ github.head_ref }}"
+          git push
 
   # Comment on the PR if it contains changes to .po files. The comment is there
   # to tell developers how the process is to get translations ready.
