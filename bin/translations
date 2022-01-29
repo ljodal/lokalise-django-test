@@ -1066,10 +1066,19 @@ def extract_translations(*paths: Path) -> Catalog:
         )
 
         for filename, lineno, message, comments, context in extracted:
+            flags = []
+            if any(
+                parse_brace_field_names(message_id)
+                for message_id in (
+                    message if isinstance(message, (list, tuple)) else (message,)
+                )
+            ):
+                flags.append("python-brace-format")
+
             template.add(
                 message,
-                None,
-                [(filename, lineno)],
+                locations=[(filename, lineno)],
+                flags=flags,
                 auto_comments=comments,
                 context=context,
             )
