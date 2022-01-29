@@ -1,0 +1,15 @@
+{
+    "problemMatcher": [
+        {
+            "owner": "translations",
+            "pattern": [
+                {
+                    "regexp": "^([^:]+):((\\d+):)? (.*)$",
+                    "file": 1,
+                    "line": 3,
+                    "message": 4
+                }
+            ]
+        }
+    ]
+}

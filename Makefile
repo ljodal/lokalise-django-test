@@ -7,10 +7,7 @@ black:
 .PHONY: mypy
 mypy:
 	mypy project
-	mypy bin/check-translations
-	mypy bin/compare-translations
-	mypy bin/compile-translations
-	mypy bin/extract-translations
+	mypy bin/translations
 
 .PHONY: isort
 isort:
