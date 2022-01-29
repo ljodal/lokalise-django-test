@@ -100,9 +100,9 @@ jobs:
         id: check
         run: |
           if [[ `git status --porcelain --untracked-files=no` ]]; then
-            echo "::set-output name=has_changes::false"
-          else
             echo "::set-output name=has_changes::true"
+          else
+            echo "::set-output name=has_changes::false"
           fi
       - name: Configure git
         run: |
