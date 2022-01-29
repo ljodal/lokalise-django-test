@@ -485,6 +485,9 @@ class Checker:
         self.has_errors = True
 
     def check_is_translated(self, message: Message) -> None:
+        """
+        Emit a warning if any message is missing a translation
+        """
 
         message_strings = (
             message.string
@@ -495,6 +498,14 @@ class Checker:
             self.emit_error(
                 f"Missing translation for {self.catalog.locale.display_name}"
             )
+
+    def check_is_fuzzy(self, message: Message) -> None:
+        """
+        Emit a warning if a message is fuzzy
+        """
+
+        if message.fuzzy:
+            self.emit_error(f"{self.catalog.locale.display_name} translation is fuzzy")
 
     def check_missing_brace_format_flag(self, message: Message) -> None:
         """
