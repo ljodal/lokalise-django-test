@@ -16,34 +16,27 @@ concurrency:
   cancel-in-progress: false # Let previous job complete
 
 jobs:
+
+  # Upload translations to Lokalise if the PR has the "needs translations"
+  # label. This label is used as the signal from developers that the PR is
+  # ready for translations.
   upload-to-lokalise:
-    name: Upload to Lokalise
+    name: Upload translations
     runs-on: ubuntu-latest
-    # Only run this if the PR is flagged with needs-translations. We do this
-    # because we don't want to upload work-in-progress translations until the
-    # developer marks the PR as ready.
     if: contains(github.event.pull_request.labels.*.name, 'needs translations')
     steps:
       - name: Checkout
         uses: actions/checkout@v2
-      - name: Install Lokalise CLI
+      - name: Setup project
+        uses: ./.github/actions/setup-project
+      - name: Upload translations
         run: |
-          curl -sfL https://raw.githubusercontent.com/lokalise/lokalise-cli-2-go/master/install.sh | sh
-          echo "${{ github.workspace }}/bin" >> $GITHUB_PATH
-      - name: Upload .po files
-        run: |
-          set -ex
-          languages=("en" "nb")
-          for language in "${languages[@]}"; do
-              lokalise2 \
-                --token "${{ secrets.LOKALISE_API_TOKEN }}" \
-                --project-id "${{ secrets.LOKALISE_PROJECT_ID }}" \
-                file upload \
-                --file "project/locale/${language}/LC_MESSAGES/django.po" \
-                --lang-iso "${language}" \
-                --convert-placeholders=false \
-                --tags "user:${{ github.event.pull_request.user.login }},pr:${{ github.event.pull_request.number }}"
-          done
+          ./bin/translations upload project/locale \
+            --base-commit "${{ github.event.pull_request.number }}" \
+            --lokalise-api-token "${{ secrets.LOKALISE_API_TOKEN }}"  \
+            --lokalise-project-id "${{ secrets.LOKALISE_PROJECT_ID }}"  \
+            --lokalise-tag "user:${{ github.event.pull_request.user.login }}" \
+            --lokalise-tag "pr:${{ github.event.pull_request.number }}"
       - name: Comment on PR
         uses: actions/github-script@v5
         with:
@@ -86,6 +79,29 @@ jobs:
               });
             }
 
+  # Download translations from Lokalise when the "needs translations" label is
+  # removed. This is only run once, when the label is removed, because we don't
+  # want to accidentally override developers work-in-progress.
+  download-from-lokalise:
+    name: Download translations
+    runs-on: ubuntu-latest
+    # Only run when the "needs translations" label is removed
+    if: ${{ github.event.action == "unlabeled" && github.event.label.name == 'needs translations' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+      - name: Setup project
+        uses: ./.github/actions/setup-project
+      - name: Upload translations
+        run: |
+          ./bin/translations download -o project/locale . \
+            --lokalise-api-token "${{ secrets.LOKALISE_API_TOKEN }}"  \
+            --lokalise-project-id "${{ secrets.LOKALISE_PROJECT_ID }}"
+      - name: Show status
+        run: git diff
+
+  # Comment on the PR if it contains changes to .po files. The comment is there
+  # to tell developers how the process is to get translations ready.
   comment:
     name: Comment on PR
     runs-on: ubuntu-latest
