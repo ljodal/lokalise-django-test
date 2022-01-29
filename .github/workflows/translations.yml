@@ -57,10 +57,7 @@ jobs:
             const commentText = `
             Your translations have been uploaded to Lokalise. We will notify you when the translations are ready.
 
-            <details>
-            <summary>About this bot</summary>
-            This comment was posted by <a href="${runLink}">this workflow</a>.
-            </details>
+            <i>This comment was posted by <a href="${runLink}">this workflow</a>.</i>
 
             ${markerComment}
             `;
@@ -152,10 +149,7 @@ jobs:
             const commentText = `
             Howdy 👋 It looks like this pull request contains changes to translations. When your PR is ready please add the \`needs translations\` label to the PR. The translations will then be automatically uploaded to Lokalise.
 
-            <details>
-            <summary>About this bot</summary>
-            This comment was posted by <a href="${runLink}">this workflow</a>.
-            </details>
+            <i>This comment was posted by <a href="${runLink}">this workflow</a>.</i>
 
             ${markerComment}
             `;
