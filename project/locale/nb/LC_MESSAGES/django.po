@@ -34,9 +34,9 @@ msgstr "verden"
 #: project/app/templates/test.html
 #, python-format
 msgid "Hello %(name)s"
-msgstr ""
+msgstr "Hei %(name)s"
 
 #: project/app/templates/test.html
 msgid "How cool isn't this?"
-msgstr ""
+msgstr "Hvor kult er ikke dette?"
 
