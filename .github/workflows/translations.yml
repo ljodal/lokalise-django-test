@@ -2,7 +2,7 @@ name: Translations
 
 on: 
   pull_request:
-    types: [opened, synchronize, reopened, labeled]
+    types: [opened, synchronize, reopened, labeled, unlabeled]
     paths:
       - '**.po'
 
@@ -27,12 +27,14 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v2
+      - name: Fetch base commit
+        run: git fetch --depth=1 origin "${{ github.event.pull_request.base.sha }}"
       - name: Setup project
         uses: ./.github/actions/setup-project
       - name: Upload translations
         run: |
           ./bin/translations upload project/locale \
-            --base-commit "${{ github.event.pull_request.number }}" \
+            --base-commit "${{ github.event.pull_request.base.sha }}" \
             --lokalise-api-token "${{ secrets.LOKALISE_API_TOKEN }}"  \
             --lokalise-project-id "${{ secrets.LOKALISE_PROJECT_ID }}"  \
             --lokalise-tag "user:${{ github.event.pull_request.user.login }}" \
@@ -86,19 +88,36 @@ jobs:
     name: Download translations
     runs-on: ubuntu-latest
     # Only run when the "needs translations" label is removed
-    if: ${{ github.event.action == "unlabeled" && github.event.label.name == 'needs translations' }}
+    if: ${{ github.event.action == 'unlabeled' && github.event.label.name == 'needs translations' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v2
       - name: Setup project
         uses: ./.github/actions/setup-project
-      - name: Upload translations
+      - name: Download translations
         run: |
-          ./bin/translations download -o project/locale . \
+          ./bin/translations download --output project/locale . \
             --lokalise-api-token "${{ secrets.LOKALISE_API_TOKEN }}"  \
             --lokalise-project-id "${{ secrets.LOKALISE_PROJECT_ID }}"
-      - name: Show status
-        run: git diff
+      - name: Check for changes
+        id: check
+        run: |
+          git diff
+          if [[ `git status --porcelain --untraced-files=no` ]]; then
+            echo "::set-output name=has_changes::false"
+          else
+            echo "::set-output name=has_changes::true"
+          fi
+      - name: Configure git
+        run: |
+          git config user.name "GitHub Actions Bot"
+          git config user.email "<>"
+      - name: Commit changes (if any)
+        if: steps.check.outputs.run_job == 'true'
+        run: |
+          git add -u
+          git commit -m "Add translations from GitHub"
+          git push
 
   # Comment on the PR if it contains changes to .po files. The comment is there
   # to tell developers how the process is to get translations ready.
