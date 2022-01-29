@@ -113,7 +113,7 @@ jobs:
         run: |
           git add -u
           git commit -m "Add translations from GitHub"
-          git push "HEAD:${{ github.head_ref }}"
+          git push origin "HEAD:${{ github.head_ref }}"
 
   # Comment on the PR if it contains changes to .po files. The comment is there
   # to tell developers how the process is to get translations ready.
