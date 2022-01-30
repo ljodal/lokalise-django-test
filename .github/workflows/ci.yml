@@ -25,7 +25,6 @@ jobs:
       - name: Run ${{ matrix.linter }}
         run: make ${{ matrix.linter }}
   translations:
-    name: "Translations"
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
