@@ -118,7 +118,7 @@ def write_catalog(path: Path, catalog: Catalog) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
     buf = BytesIO()
-    write_po(buf, catalog, ignore_obsolete=True)
+    write_po(buf, catalog, ignore_obsolete=True, include_lineno=False)
     buf.seek(0)
 
     with open(path, "wb") as f:
@@ -876,14 +876,18 @@ def post_github_comment(
     Post a comment with the provided diffs
     """
 
-    header = (
-        "Hi there, it looks like made changes to the translations in this PR 🌍 "
-        "Below is a summary of the changes:"
+    title = "## 🌍 Translations"
+    text = (
+        "Once you are ready for the translators to start working, please add "
+        "the `needs translations` label to the pull request. The translations "
+        "are then automatically uploaded to Lokalise. Once they are ready "
+        "they will be added to your pull request and we will notify you."
     )
+    changes_title = "### Summary of changes"
     changes = [
         dedent(
             """\
-            <details><summary><strong>{path}</strong></summary>
+            <details><summary>Changes in {path}</summary>
 
             ```diff
             {diff}
@@ -894,18 +898,15 @@ def post_github_comment(
         ).format(path=path, diff=diff)
         for path, diff in diffs.items()
     ]
-    footer = (
-        "Once you are happy with the changes, please add the `needs translations` "
-        "label to the pull request. This will trigger "
-    )
     workflow_link = (
-        f"_This comment was posted by [this workflow]({workflow_link})."
+        f"_This comment was posted by [this workflow]({workflow_link}). "
+        f"It will be automatically updated when you make changes._"
         if workflow_link
         else ""
     )
     marker = "<!-- translations diff bot -->"
 
-    body = "\n\n".join((header, *changes, footer, workflow_link, marker))
+    body = "\n\n".join((title, text, changes_title, *changes, workflow_link, marker))
 
     url = f"https://api.github.com/repos/{repo}/issues/{pull_number}/comments"
     headers = {
@@ -922,21 +923,10 @@ def post_github_comment(
     )
 
     if comment:
-        comment_id = comment["id"]
         if comment["body"] != body:
-            request(
-                "PATCH",
-                f"/repos/{repo}/issues/comments/{comment_id}",
-                headers=headers,
-                data={"body": body},
-            )
+            request("PATCH", comment["url"], headers=headers, data={"body": body})
     else:
-        request(
-            "POST",
-            f"/repos/{repo}/issues/comments",
-            headers=headers,
-            data={"body": body},
-        )
+        request("POST", url, headers=headers, data={"body": body})
 
 
 def print_diff(path: Path, diff: str) -> None:
