@@ -17,7 +17,7 @@ isort = "^5.10.1"
 django-stubs = "^1.9.0"
 types-babel = "^2.9.5"
 ipython = "^8.0.1"
-babel = {git = "https://github.com/kolonialno/babel.git", rev = "e44a1e632406853530126bf357ddcfe9a223a04e"}
+babel = {url = "https://github.com/kolonialno/babel/releases/download/v2.9.1-oda.1/Babel-2.9.1.tar.gz"}
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]
