@@ -2,7 +2,7 @@
 msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
-"Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
+"Report-Msgid-Bugs-To: \n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -13,24 +13,6 @@ msgstr ""
 "Content-Transfer-Encoding: 8bit\n"
 "Generated-By: Babel 2.9.1\n"
 
-#: project/settings.py
-msgid "Norwegian"
-msgstr "Norwegian"
-
-#: project/settings.py
-msgid "English"
-msgstr "Foo"
-
-#. This is a test
-#: project/app/views.py
-#, python-brace-format
-msgid "Hello {name}, I'm Django!"
-msgstr "Hello {name}, I'm Django!"
-
-#: project/app/views.py project/app/views.py
-msgid "world"
-msgstr "world"
-
 #: project/app/templates/test.html
 #, python-format
 msgid "Hello %(name)s"
@@ -39,4 +21,22 @@ msgstr "Hi %(name)s"
 #: project/app/templates/test.html
 msgid "How cool isn't this?"
 msgstr "How cool isn't this?"
+
+#. This is a test
+#: project/app/views.py
+#, python-brace-format
+msgid "Hello {name}, I'm Django!"
+msgstr "Hello {name}, I'm Django!"
+
+#: project/app/views.py
+msgid "Oda"
+msgstr "Oda"
+
+#: project/settings.py
+msgid "Norwegian"
+msgstr "Norwegian"
+
+#: project/settings.py
+msgid "English"
+msgstr "Foo"
 
